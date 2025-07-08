@@ -4,16 +4,14 @@
 # Requirements
 import numpy as np
 import os
-
-import random
 import matplotlib.pyplot as plt
 import deeplake
 
 
-# integrer deeplake
-
-
-def Fourier_Domain_Adaptation(src_image, target_amplitude, L=0.01, save=False, output_folder="", display=False):
+def Fourier_Domain_Adaptation(src_image, L=0.01, save=False, output_folder="", display=False):
+    
+    # reference point, below is the average amplitude from all patches from all WSIs from Akoya Scanner ('general average')
+    target_amplitude = np.load("/home/leolr-int/ASTAR_internship/Fourier_Domain_Adaptation/stored_amplitude/general_average_akoya.npy")
 
     # Compute FFT of the source image
     fft_src = np.fft.fft2(src_image, axes=(-2, -1))
@@ -69,9 +67,23 @@ def Fourier_Domain_Adaptation(src_image, target_amplitude, L=0.01, save=False, o
     return adapted_image
 
 
-# Example on how to run the function
+# Example on how to run the function (data from a deeplake dataset)
 
+'''
+from FDA import Fourier_Domain_Adaptation
+import deeplake
+import time
 
+# fetching data (deeplake dataset)
+dataset_path_akoya_1 = f"/home/leolr-int/data/data/patched/dim_256/Train/Subset3_Train_1_Akoya"
+akoya_1 = deeplake.open_read_only(dataset_path_akoya_1)
+dataset_path_KFbio_1 = f"/home/leolr-int/data/data/patched/dim_256/Train/Subset3_Train_1_KFBio"
+KFBio_1 = deeplake.open_read_only(dataset_path_KFbio_1)
 
+# Preprocessing
+src_img = KFBio_1[200]["patch"].transpose((2, 0, 1))  # (3, 256, 256)
+trg_img = akoya_1[200]["patch"].transpose((2, 0, 1))
 
-    
+output_folder = '/home/leolr-int/ASTAR_internship/Fourier_Domain_Adaptation/images'
+KFBio_to_Akoya = Fourier_Domain_Adaptation(src_img, save=False, output_folder=output_folder, display=False)
+'''
