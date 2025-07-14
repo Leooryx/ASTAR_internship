@@ -1,6 +1,6 @@
 
-import torch
-import utils 
+
+'''import utils 
 import pyvips
 
 print("✅ pyvips importé avec succès")
@@ -16,7 +16,61 @@ rotated.write_to_file("test_output.png")
 
 print(torch.__version__)
 print(torch.version.cuda)
-print('CUDA available:', torch.cuda.is_available())
+print('CUDA available:', torch.cuda.is_available())'''
+
+import time 
+start_time = time.time()
+
+import torch
+import torchvision.models as models
+import torchvision.transforms as transforms
+from FDA import Fourier_Domain_Adaptation
+import deeplake
+import numpy as np
+from PIL import Image
+
+# Load datasets
+akoya_1 = deeplake.open_read_only("/home/leolr-int/data/data/patched/dim_256/Train/Subset3_Train_1_Akoya")
+KFBio_1 = deeplake.open_read_only("/home/leolr-int/data/data/patched/dim_256/Train/Subset3_Train_1_KFBio")
+
+# Get images and apply FDA
+src_img = KFBio_1[200]["patch"].transpose((2, 0, 1))  # (3, H, W)
+trg_img = akoya_1[200]["patch"].transpose((2, 0, 1))
+output_folder = '/home/leolr-int/ASTAR_internship/Fourier_Domain_Adaptation/images'
+fda_img = Fourier_Domain_Adaptation(src_img, save=False, output_folder=output_folder, display=False)  # still (3, H, W)
+
+# Convert back to (H, W, C) and to uint8 (if needed)
+fda_img = np.transpose(fda_img, (1, 2, 0)).astype(np.uint8)
+fda_img_pil = Image.fromarray(fda_img)
+
+# Torch preprocessing
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5]*3, std=[0.5]*3)
+])
+
+img_tensor = transform(fda_img_pil).unsqueeze(0)  # shape: (1, 3, 256, 256)
+
+# Load pretrained model
+model = models.resnet18(pretrained=True)
+model.eval()
+
+# Remove classification head
+embedding_model = torch.nn.Sequential(*list(model.children())[:-1])  # (1, 512, 1, 1)
+
+# Get embedding
+with torch.no_grad():
+    embedding = embedding_model(img_tensor).squeeze()  # shape: (512,)
+
+print("Embedding shape:", embedding.shape)
+print("Embedding vector:", embedding)
+
+
+
+end_time = time.time()
+
+
+print(f"Time taken for FDA: {end_time - start_time} seconds") 
 
 '''
 encoder_dir = os.path.join(BASE_MODEL_DIR, "pre_trained_weights")

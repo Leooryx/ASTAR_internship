@@ -11,7 +11,7 @@ import deeplake
 def Fourier_Domain_Adaptation(src_image, L=0.01, save=False, output_folder="", display=False):
     
     # reference point, below is the average amplitude from all patches from all WSIs from Akoya Scanner ('general average')
-    target_amplitude = np.load("/home/leolr-int/ASTAR_internship/Fourier_Domain_Adaptation/stored_amplitude/general_average_akoya.npy")
+    target_amplitude = np.load("/home/leolr-int/nfs/ASTAR_internship/Fourier_Domain_Adaptation/stored_amplitude/general_average_akoya.npy")
 
     # Compute FFT of the source image
     fft_src = np.fft.fft2(src_image, axes=(-2, -1))
