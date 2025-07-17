@@ -1,6 +1,12 @@
 # Here is the code to apply Fourier Domain Adaptation
 
 
+# TODO: if loop to verify type and apply operations if deeplake object
+# TODO: improve white filter (the heuristic chosen was only based on vision)
+# TODO: select a good reference point / distribution
+# TODO: very important --> conditional transformation based on input specificities
+
+
 # Requirements
 import numpy as np
 import os
@@ -41,7 +47,7 @@ def Fourier_Domain_Adaptation(src_image, L=0.01, save=False, output_folder="", d
     # Clip to valid range and convert to uint8 for correct visualisation
     adapted_image = np.clip(adapted_image, 0, 255).astype(np.uint8)
 
-    # saving picture
+    # Save picture
     if save:
         os.makedirs(output_folder, exist_ok=True)
         filename = f"FDA_L_{L}.png"
