@@ -188,7 +188,7 @@ def new_FDA(src_image, amp_matched, L=0.01, save=False, output_folder="", displa
 
 
 
-def FDA_CD(src_img, save=False, output_folder="", display=True):
+def FDA_CD(src_img, save=False, output_folder="", display=False):
     
     vector = Flat_log_Fourier(src_img)
     
@@ -201,3 +201,23 @@ def FDA_CD(src_img, save=False, output_folder="", display=True):
     vector_KFBio_to_Akoya = match_vector_to_target_distribution(vector, src_cdfs, tgt_cdfs)
 
     return new_FDA(src_img, vector_KFBio_to_Akoya,0.01, save, output_folder, display)
+
+
+# Test
+
+import time
+
+
+dataset_path_KFbio_1 = f"/home/leolr-int/nfs/data/data/patched/dim_256/Train/Subset3_Train_1_KFBio"
+KFBio_1 = deeplake.open_read_only(dataset_path_KFbio_1)
+
+# Preprocessing
+src_img = KFBio_1[200]["patch"].transpose((2, 0, 1))  # (3, 256, 256)
+#trg_img = akoya_1[200]["patch"].transpose((2, 0, 1))
+
+start_time = time.time()
+KFBio_to_Akoya = FDA_CD(src_img, save=False, output_folder="", display=False)
+end_time = time.time()
+print(f"Time taken: {end_time - start_time} seconds") 
+
+
