@@ -205,7 +205,7 @@ def FDA_CD(src_img, save=False, output_folder="", display=False):
 
 # Test
 
-import time
+'''import time
 
 
 dataset_path_KFbio_1 = f"/home/leolr-int/nfs/data/data/patched/dim_256/Train/Subset3_Train_1_KFBio"
@@ -218,6 +218,6 @@ src_img = KFBio_1[200]["patch"].transpose((2, 0, 1))  # (3, 256, 256)
 start_time = time.time()
 KFBio_to_Akoya = FDA_CD(src_img, save=False, output_folder="", display=False)
 end_time = time.time()
-print(f"Time taken: {end_time - start_time} seconds") 
+print(f"Time taken: {end_time - start_time} seconds") '''
 
 
