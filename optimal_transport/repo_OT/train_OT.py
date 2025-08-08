@@ -39,13 +39,13 @@ def main():
         print("Let's use", torch.cuda.device_count(), "GPUs!")
         net = net.to(device) 
         
-    #Source domain (train set)
-    train_loaderA = DataLoader(ImageDataset(root = "../camelyon_original/data/", domain = "train", lr_transforms=None, hr_transforms=None),
+    #Source domain (train set) /camelyon17_v1.0
+    train_loaderA = DataLoader(ImageDataset(root = "/home/leolr-int/nfs/ASTAR_internship/optimal_transport/repo_OT/data/", domain = "train", lr_transforms=None, hr_transforms=None),
                         batch_size=opt.batch_size, shuffle=True, num_workers=opt.n_cpu,drop_last=True)
     train_loader_iteratorA = iter(train_loaderA)
     
     #Target domain (val set)
-    train_loaderB = DataLoader(ImageDataset(root = "../camelyon_original/data/", domain = "val", lr_transforms=None, hr_transforms=None),
+    train_loaderB = DataLoader(ImageDataset(root = "/home/leolr-int/nfs/ASTAR_internship/optimal_transport/repo_OT/data/", domain = "val", lr_transforms=None, hr_transforms=None),
                         batch_size=opt.batch_size, shuffle=True, num_workers=opt.n_cpu,drop_last=True)
         
     train_loader_iteratorB = iter(train_loaderB)
