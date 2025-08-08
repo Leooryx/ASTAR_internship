@@ -121,18 +121,22 @@ def main():
                     acc_v += 1  
             A_t.append(acc)
             A_v.append(acc_v)
-            print("bstch_done: ", t,"|", "\t loss_CE: ", loss_c.item(),
-                   "\t lossgeom: ", loss_g.item(), "\t acc: ", acc/opt.batch_size, "\t acc_v: ", acc_v/opt.batch_size
-                     )   
+            #print("bstch_done: ", t,"|", "\t loss_CE: ", loss_c.item(), "\t lossgeom: ", loss_g.item(), "\t acc: ", acc/opt.batch_size, "\t acc_v: ", acc_v/opt.batch_size)    
             
          
-
+        print(f'Epoch {epoch}, accuracy_training={A_t[:-1]}, val_accuracy={A_v[:-1]}')
         torch.save(net.state_dict(),'saved_models_'+ str(opt.exp) +'/' +str(epoch)+'.pth')
         
         # Evaluation for each train, val, and test set
-        Eval(epoch,opt.exp,"train",opt.dataset_dir)
+        '''Eval(epoch,opt.exp,"train",opt.dataset_dir)
         Eval(epoch,opt.exp,"val",opt.dataset_dir)
-        Eval(epoch,opt.exp,"test",opt.dataset_dir)
+        Eval(epoch,opt.exp,"test",opt.dataset_dir)'''
+
+        # correction
+        root = "/home/leolr-int/nfs/ASTAR_internship/optimal_transport/repo_OT/data/"
+        Eval(epoch,opt.exp,"train",root)
+        Eval(epoch,opt.exp,"val",root)
+        Eval(epoch,opt.exp,"test",root)
 
 
 if __name__ == '__main__':
