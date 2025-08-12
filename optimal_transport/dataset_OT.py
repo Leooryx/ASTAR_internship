@@ -1,42 +1,5 @@
 # how to handle the different datasets for training?
 # just define the dataset pytorch for the embeddings
-# i have Akoya, KFBio but not Leica
-
-import os
-import multiprocessing
-from pathlib import Path
-from datetime import datetime
-from functools import partial
-from collections import defaultdict
-from typing import (
-    Any,
-    Dict, 
-    List,
-    Tuple,
-    Iterable,
-    Optional,
-    Callable
-)
-
-import torch
-import pyvips
-import deeplake
-import numpy as np
-import pandas as pd
-from PIL import Image
-from tqdm import tqdm
-from torchvision import transforms
-from torch.utils.data import Dataset
-
-from .chunk_helpers import foreground_patch
-from .image_migration_helpers import match_distribution
-
-
-
-
-
-
-
 
 
 #fusion between Eric and OT repositories
@@ -47,14 +10,37 @@ from .image_migration_helpers import match_distribution
 
 
 import numpy as np
-from torch.utils.data import DataLoader
-from torch.utils.data import Dataset
-import torchvision.transforms as transforms
-import random
-from wilds import get_dataset
-from wilds.common.data_loaders import get_train_loader
+from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+import deeplake 
 
-fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+
+
+class patches_loader(Dataset):
+    '''
+    Class to handle patches stored as deeplake objects
+    '''
+    def __init__(self, train_or_test, WSI_id, scanner):
+        self.split = train_or_test
+        self.WSI_id = WSI_id
+        self.scanner = scanner
+        directory = f"/home/leolr-int/nfs/data/data/patched/dim_256/{train_or_test}"
+        #here we consider only Subset3
+        file = f'Subset3_{train_or_test}_{WSI_id}_{scanner}'
+        self.patches = deeplake.open_read_only(f'{directory}/{file}')
+    
+    # to specify a label and then access the columns of the deeplake dataset
+    def __getitem__(self, idx):
+        return self.patches[idx]
+    # Example: patches[idx]['label']
+    
+    def display(self, idx): 
+        fig, axes = plt.subplots(figsize=(4, 4))
+        axes.imshow(self.patches[idx]["patch"])
+        plt.show()
+
+        
+'''fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 dataset_path_akoya_1 = f"/home/leolr-int/nfs/data/data/patched/dim_256/Train/Subset3_Train_1_Akoya"
 akoya_1 = deeplake.open_read_only(dataset_path_akoya_1)
 axes[0].imshow(akoya_1[200]["patch"])
@@ -64,34 +50,20 @@ KFBio_1 = deeplake.open_read_only(dataset_path_KFbio_1)
 axes[1].imshow(KFBio_1[200]["patch"])
 plt.suptitle(f"Subset3_Train_1_ Akoya and KFBio")
 plt.savefig("/home/leolr-int/nfs/ASTAR_internship/Fourier_Domain_Adaptation/images/akoya_vs_KFBio.svg")
-plt.show()
-
-class embeddings_loader(Dataset):
-    '''
-    Class to handle embeddings stored as deeplake objects
-    '''
-    def __init__(train_or_test, WSI_id, scanner):
-        self.split = train_or_test
-        self.WSI_id = WSI_id
-        self.scanner = scanner
-        directory = f"/home/leolr-int/nfs/data/data/patched/dim_256/{train_or_test}"
-        file = f'Subset3_{train_or_test}_{WSI_id}_{scanner}'
-        self.embedding = deeplake.open_read_only(f'{directory}/{file}')
-        
-        #attention la je fais les images et pas du tout les embeddings!
+plt.show()'''        
 
 #example of the deeplake dataset for embeddings
-        embed_ds = deeplake.create(save_dir)
-        embed_ds.add_column("embedding", dtype=deeplake.types.Embedding(embedding_dim))
-        embed_ds.add_column("label", dtype=deeplake.types.Int32)
+'''embed_ds = deeplake.create(save_dir)
+embed_ds.add_column("embedding", dtype=deeplake.types.Embedding(embedding_dim))
+embed_ds.add_column("label", dtype=deeplake.types.Int32)
 
-        # metadata cols
-        embed_ds.add_column("area", dtype=deeplake.types.Int32)
-        embed_ds.add_column("x", dtype=deeplake.types.Int32)
-        embed_ds.add_column("y", dtype=deeplake.types.Int32)
-        embed_ds.add_column("w", dtype=deeplake.types.Int32)
-        embed_ds.add_column("h", dtype=deeplake.types.Int32)
-        embed_ds.add_column("img_idx", dtype=deeplake.types.Int32)
+# metadata cols
+embed_ds.add_column("area", dtype=deeplake.types.Int32)
+embed_ds.add_column("x", dtype=deeplake.types.Int32)
+embed_ds.add_column("y", dtype=deeplake.types.Int32)
+embed_ds.add_column("w", dtype=deeplake.types.Int32)
+embed_ds.add_column("h", dtype=deeplake.types.Int32)
+embed_ds.add_column("img_idx", dtype=deeplake.types.Int32)
 
 
 def linear_probing(weights_path, dataset):
@@ -344,3 +316,4 @@ def embedding_transform_fn(row: Dict[str, Any]) -> Tuple[torch.Tensor]:
 
 
 
+'''
