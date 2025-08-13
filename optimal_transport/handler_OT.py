@@ -15,7 +15,7 @@ from typing import (
     Tuple, 
     Literal
 )
-
+import random
 import torch
 import numpy as np
 import torch.nn as nn
@@ -26,127 +26,228 @@ from torch.utils.data import DataLoader
 from deeplake import Dataset as DeepLakeDataset
 from sklearn.metrics import balanced_accuracy_score
 
-from .network import Network
-from .save import save_table
+#from .network import Network
+#from .save import save_table
+
+from dataset_OT import multi_WSI_loader 
+from architecture_OT import Neural_Network
+from geomloss import SamplesLoss
+
+class NetworkHandler:
+    '''
+    A class to handle training, inference and prediction
+    '''
+
+    def __init__(self, OT = False, precision = 'mixed', freeze_encoder = True, embedding_mode = False, display = False):
+        self.OT = OT
+        self.precision = precision
+        self.freeze_encoder = freeze_encoder
+        self.embedding_mode = embedding_mode
+        self.display = display
+
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        BASE_MODEL_DIR = '/home/leolr-int/AGGCPerturbations/model_weights'
+        self.model = Neural_Network(BASE_MODEL_DIR)
+        self.model = self.model.to(self.device)
+
+        self.use_amp = precision == 'mixed' and self.device == 'cuda'
+        self.grad_scaler = GradScaler(enabled=self.use_amp)
+
+        self.use_amp = precision == "mixed" and self.device == "cuda"
+        self.grad_scaler = GradScaler(enabled=self.use_amp)
+        self.model = self.model.to(self.device)
+
+
+    def training(self, train_scanners, num_epochs):
+        #pour le training faudra bien comprendre le repo !!
+        # display graphs
+        metrics = {'running_loss':0, 'predictions':[], 'targets':[]}
+
+        self.model.train()
+
+        if self.freeze_encoder or self.embedding_mode:
+            self.model.encoder.eval()
+
+        # indices of the slides for training
+        WSI_ids_train = [1,2,3]
+        batch_size = 128
+        
+        
+        if self.OT: 
+            #we differentiate explicitly source and target scanner to apply the OT loss
+            
+            # Defining OT-based loss function
+            loss_geom = SamplesLoss('sinkhorn', p=2, blur=0.1, scaling=0.95, verbose=False)
+            Lambda = 0.1 # strength of OT (0.1 is the value of the article)
+            
+            target_scanner = ['Akoya'] if 'Akoya' in train_scanners else random.choice(train_scanners)
+            train_scanners.remove(target_scanner[0])
+            source_scanner = train_scanners
+
+            target_dataset = multi_WSI_loader(WSI_ids_train, target_scanner, train_or_test='Train')
+            source_dataset = multi_WSI_loader(WSI_ids_train, source_scanner, train_or_test='Train')
+
+            # DataLoaders
+            train_loader_target = DataLoader(target_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
+            train_loader_source = DataLoader(source_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
+            
+            iterator_train_loader_target = iter(train_loader_target)
+            iterator_train_loader_source = iter(train_loader_source)
+            
+            optimizer = torch.optim.SGD(self.model.parameters(), lr=0.03, momentum=0.9, weight_decay=0.001)
+            torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
+
+            #keep tracks of performance evolution
+            Loss_G = []
+            Loss_CE = []
+            A_t = []
+            A_v = []
+
+            for epoch in range(epoch, num_epochs):
+                self.model.train()
+                #deactivate the training for encoder if needed
+                if self.freeze_encoder or self.embedding_mode: 
+                    self.model.encoder.eval()
+            
+                
+                for i in range(len(train_loader_source)):
+                    #t = epoch*len(train_loader_source) + i
+                    try: #potentially the scanner datasets do not have the same length
+                        X1, Y1, _ = next(iterator_train_loader_source) #we dont really care about metadata here
+                    except StopIteration:
+                        iterator_train_loader_source = iter(train_loader_source)
+                        X1, Y1, _ = next(iterator_train_loader_source)
+                
+                    try: #potentially the scanner datasets do not have the same length
+                        X2, Y2, _ = next(iterator_train_loader_target) #we dont really care about metadata here
+                    except StopIteration:
+                        iterator_train_loader_target = iter(train_loader_target)
+                        X2, Y2, _ = next(iterator_train_loader_target)
+
+                    X1 = X1.to(self.device)
+                    Y1 = Y1.to(self.device)
+                    X2 = X2.to(self.device)
+                    Y2 = Y2.to(self.device)
+
+                    with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
+                        #if embeddings from gigapath are already computed, we can speed up training
+                        logits = self.model.bottle_neck(patch) if self.embedding_mode else self.model(patch)
+                        logits_source =  self.model.bottle_neck(X1) if self.embedding_mode else self.model(X1)
+                        logits_target = self.model.bottle_neck(X2) if self.embedding_mode else self.model(X2)
+                        # source features
+                        feat1 = nn.Sequential(*list(self.model.children())[:-1])(X1)
+                        # target features
+                        feat2 = nn.Sequential(*list(self.model.children())[:-1])(X2)
+
+                        #OT loss
+                        loss_g = loss_geom(feat1.detach().squeeze, feat2.detach().squeeze)
+                    
+                        # liberty taken here: instead of copy-pasting the code from https://github.com/kiakh93/OT-regularized-UDA/blob/main/train_OT.py
+                        # i decided to compute two cross entropies for source and target domain
+
+                        #CE loss
+                        loss_c = nn.CrossEntropyLoss(pred_source, Y1) + nn.CrossEntropyLoss(pred_target, Y2)
+                        
+                        # total loss
+                        loss_train = loss_c + Lambda*loss_g
+                        
+                    self.grad_scaler.scale(loss_train).backward()
+                    self.grad_scaler.step(optimizer)
+                    self.grad_scaler.step()
+                    optimizer.zero_grad()
+                    
+                    # performance
+                    confidence_source = F.softmax(logits_source, dim=1) #why not include that in the network directly in forward?
+                    confidence_target = F.softmax(logits_target, dim=1)
+                    pred_source = torch.argmax(confidence_source, dim=1)
+                    pred_target = torch.argmax(confidence_target, dim=1)
+
+
+                   #performance metrics
+                    metrics['running_loss'] += loss.detach().cpu().item()
+                    metrics['predictions'].extend(pred.cpu().numpy())
+                    metrics['labels'].extend(label.cpu().numpy())
+
+                    pbar.set_postfix({'step_loss': loss.detach().cpu().item()})
+                
+                epoch_loss = metrics['running_loss'] / len(train_loader)
+                epoch_balanced_accuracy = balanced_accuracy_score(metrics['labels'], metrics['predictions'])
+                
+                return epoch_loss, epoch_balanced_accuracy 
+
+
+
+
+                    '''Loss_G.append(loss_g.item())
+                    Loss_CE.append(loss_c.item())
+
+                    #Accuracy of source
+                    pred_y = outputs1.cpu().detach().numpy()
+                    pred_y = np.argmax(pred_y, axis=1)
+                    acc = 0
+                    for i in range(len(pred_y)):
+                        if pred_y[i] == Y1[i].data.cpu().numpy():
+                            acc+=1
+                    
+                    output = self.model(X2)
+
+                    # accuracy of target
+                    pred_y = output.cpu().detach.numpy()
+                    pred_y = np.argmax(pred_y, axis=1)
+                    acc_v = 0
+                    for i in range(len(pred_y)):
+                        if pred_y[i] == Y2[i].data.cpu().numpy():
+                            acc_v+=1
+                    
+                    A_t.append(acc)
+                    A_v.append(acc_v)
+                
+                # TODO: performance per epoch'''
+
+        else:
+            # here we train only using cross entropy
+            train_dataset = multi_WSI_loader(WSI_ids_train, train_scanners, train_or_test='Train')
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
+
+            self.model.train()
+            #deactivate the encoder training if needed
+            if self.freeze_encoder or self.embedding_mode: 
+                self.model.encoder.eval()
+            
+            pbar = tqdm(train_loader, desc='Training with Cross-Entropy in progress')
+
+            for patch, label, *_ in pbar:
+                patch = patch.to(self.device)
+                label = label.to(self.device)
+
+                with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
+                    #if embeddings from gigapath are already computed, we can speed up training
+                    logits = self.model.bottle_neck(patch) if self.embedding_mode else self.model(patch)
+                    loss = nn.CrossEntropy(logits, label)
+                
+                self.grad_scaler.scale(loss).backward()
+                self.grad_scaler.step(optimizer)
+                self.grad_scaler.step()
+                optimizer.zero_grad()
+
+                confidence = F.softmax(logits, dim=1)
+                pred = torch.argmax(confidence, dim=1)
+                
+                #performance metrics
+                metrics['running_loss'] += loss.detach().cpu().item()
+                metrics['predictions'].extend(pred.cpu().numpy())
+                metrics['labels'].extend(label.cpu().numpy())
+
+                pbar.set_postfix({'step_loss': loss.detach().cpu().item()})
+            
+            epoch_loss = metrics['running_loss'] / len(train_loader)
+            epoch_balanced_accuracy = balanced_accuracy_score(metrics['labels'], metrics['predictions'])
+            
+            return epoch_loss, epoch_balanced_accuracy 
 
 
 class NetworkHandler:
 
-    """
-    This class encapsulates all computation logic for a given neural network,
-    including training, validation, inference and embedding extraction.
-    
-    Supports mixed precision training.
-
-    Parameters
-    ----------
-    model: Network
-        The neural network.
-
-    criterion: nn.Module
-        The function for loss computation.
-
-    optimizer: torch.optim.Optimizer
-        The optimizer for gradient descent.
-
-    precision: Literal['single', 'mixed']
-        Whether to train in mixed or single precision.
-        Must be one of ['single', 'mixed'].
-
-    freeze_encoder: bool
-        Whether the encoder is frozen.
-        Will be used as a flag in switching between train and eval modes.
-
-    embedding_mode: bool
-        Whether to perform computations on pre-extracted embeddings.
-    """
-
-    def __init__(
-        self,
-        model: Network,
-        criterion: nn.Module = None,
-        optimizer: torch.optim.Optimizer = None, 
-        precision: Literal["single", "mixed"] = "single",
-        freeze_encoder: bool = True,
-        embedding_mode: bool = False
-        ):
-
-        valid_precisions = ["single", "mixed"]
-
-        if precision not in valid_precisions:
-            raise ValueError(f"precision must be one of  {valid_precisions}.")
-
-        self.model = model
-        self.criterion = criterion
-        self.optimizer = optimizer
-        self.freeze_encoder = freeze_encoder
-        
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.use_amp = precision == "mixed" and self.device == "cuda"
-        self.grad_scaler = GradScaler(enabled=self.use_amp)
-        self.model = self.model.to(self.device)
-        self.embedding_mode = embedding_mode
-
-        if self.device != "cuda" and precision == "mixed":
-            raise ValueError(f"Mixed precision unavailable with current device: {self.device}. Switch to single precision.\n")
-
-
-    def train_epoch(self, train_loader: DataLoader) -> Tuple[float, float]:
-
-        """
-        Trains the model for 1 epoch.
-
-        Parameters
-        ----------
-        train_loader: DataLoader
-            The data loader for training.
-
-        Returns
-        -------
-        epoch_loss: float
-            The loss for the epoch.
-
-        epoch_balanced_accuracy: float
-            The average balanced accuracy for the given epoch.  
-        """
-        
-        metrics = {
-            "running_loss": 0,
-            "predictions": [],
-            "targets": []
-        }
-        
-        self.model.train()
-        if self.freeze_encoder or self.embedding_mode: self.model.encoder.eval()
-
-        pbar = tqdm(train_loader, desc="Training in progress")
-
-        for patch, target, *_ in pbar:
-            patch = patch.to(self.device)
-            target =  target.to(self.device)
-
-            with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
-                logits = self.model.fc(patch) if self.embedding_mode else self.model(patch) 
-                loss = self.criterion(logits, target)
-
-            self.grad_scaler.scale(loss).backward()
-            self.grad_scaler.step(self.optimizer)
-            self.grad_scaler.update()
-            self.optimizer.zero_grad()
-
-            confidence = F.softmax(logits, dim=1)
-            pred = torch.argmax(confidence, dim=1)
-
-            metrics["running_loss"] += loss.detach().cpu().item()
-            metrics["predictions"].extend(pred.cpu().numpy())
-            metrics["targets"].extend(target.cpu().numpy())
-
-            pbar.set_postfix({"step_loss": loss.detach().cpu().item()})
-
-        epoch_loss = metrics["running_loss"] / len(train_loader)
-        epoch_balanced_accuracy = balanced_accuracy_score(metrics["targets"], metrics["predictions"])
-
-        return epoch_loss, epoch_balanced_accuracy
     
 
     @torch.no_grad()

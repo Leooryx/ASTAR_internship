@@ -1,18 +1,8 @@
-# how to handle the different datasets for training?
-# just define the dataset pytorch for the embeddings
-
-
-#fusion between Eric and OT repositories
-
-#what batch size?
-
-# lets make a class that direclty handles deeplake dataset
-
-
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import deeplake 
+import torch
 
 
 
@@ -20,7 +10,7 @@ class patches_loader(Dataset):
     '''
     Class to handle patches stored as deeplake objects
     '''
-    def __init__(self, train_or_test, WSI_id, scanner):
+    def __init__(self, train_or_test, WSI_id, scanner, to_torch=False):
         self.split = train_or_test
         self.WSI_id = WSI_id
         self.scanner = scanner
@@ -28,18 +18,126 @@ class patches_loader(Dataset):
         #here we consider only Subset3
         file = f'Subset3_{train_or_test}_{WSI_id}_{scanner}'
         self.patches = deeplake.open_read_only(f'{directory}/{file}')
+        self.to_torch = to_torch
+
+    def summary(self):
+        return self.patches.summary()
     
     # to specify a label and then access the columns of the deeplake dataset
     def __getitem__(self, idx):
-        return self.patches[idx]
-    # Example: patches[idx]['label']
+        if self.to_torch:
+            patch = self.patches[idx]
+            img = torch.tensor(patch['patch'])
+            label = torch.tensor(patch["label"], dtype=torch.long)
+            area = torch.tensor(patch["area"], dtype=torch.long)
+            x = torch.tensor(patch["x"], dtype=torch.long)
+            y = torch.tensor(patch["y"], dtype=torch.long)
+            w = torch.tensor(patch["w"], dtype=torch.long)
+            h = torch.tensor(patch["h"], dtype=torch.long)
+            
+            metadata = {
+                "area": area,
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+                }
+            
+            return {'patch':img, 'label':label, 'metadata': metadata}
+            
+        else: 
+            return self.patches[idx]
+            # Example: patches[idx]['label']
+
+    def __len__(self):
+        return len(self.patches)
     
     def display(self, idx): 
         fig, axes = plt.subplots(figsize=(4, 4))
         axes.imshow(self.patches[idx]["patch"])
         plt.show()
 
+# Example
+'''file_test = patches_loader('Train', 1, 'Akoya', to_torch=True)
+file_test.display(200)
+file_test[200]['label']
+file_test.summary()'''
+
+
+class multi_WSI_loader(Dataset):
+    '''
+    Class to handle several WSI from different scanners
+    Used for training a neural network
+    '''
+
+    def __init__(self, WSI_ids, scanners, train_or_test='Train'):
+        self.train_or_test = train_or_test
+        self.WSI_ids = WSI_ids
+        self.scanners = scanners
         
+        # dictionary to store all the patches_loader objects
+        self.datasets = []
+        for scanner in scanners:
+            for WSI_id in WSI_ids: 
+                ds = patches_loader(train_or_test, WSI_id, scanner, to_torch=True)
+                self.datasets.append(ds)
+
+        # index mapping
+        self.index_map = []
+        for ds_idx, ds in enumerate(self.datasets):
+            for i in range(len(ds)):
+                self.index_map.append((ds_idx, i))
+            
+    # define indexing so that the dataloader can access data    
+    def __getitem__(self, idx):
+        ds_idx, sample_idx = self.index_map[idx]
+        return self.datasets[ds_idx][sample_idx] #which is a patches_loader object
+    
+    def __len__(self):
+        return len(self.index_map)
+    
+
+# Example 
+'''
+train_scanners = ['Akoya', 'Leica']
+WSI_ids = [1,2,3]
+target_scanner = ['Akoya'] if 'Akoya' in train_scanners else random.choice(train_scanners)
+train_scanners.remove(target_scanner[0])
+source_scanner = train_scanners
+
+print(target_scanner)
+print(source_scanner)
+
+target_dataset = multi_WSI_loader(WSI_ids, target_scanner, train_or_test='Train')
+source_dataset = multi_WSI_loader(WSI_ids, source_scanner, train_or_test='Train')
+
+
+# DataLoaders
+batch_size = 16
+train_loader_source = DataLoader(source_dataset, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
+train_loader_target = DataLoader(target_dataset, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
+
+
+for batch in train_loader_source:
+    images = batch['patch']
+    labels = batch['label']
+    metadata = batch['metadata']
+    print("Source batch - Images shape:", images.shape, "Labels:", labels)
+    break
+
+for batch in train_loader_target:
+    images = batch['patch']
+    labels = batch['label']
+    metadata = batch['metadata']
+    print("Target batch - Images shape:", images.shape, "Labels:", labels)
+    break
+'''
+
+
+
+
+
+
 '''fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 dataset_path_akoya_1 = f"/home/leolr-int/nfs/data/data/patched/dim_256/Train/Subset3_Train_1_Akoya"
 akoya_1 = deeplake.open_read_only(dataset_path_akoya_1)
