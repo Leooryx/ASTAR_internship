@@ -149,7 +149,7 @@ class NetworkHandler:
             metrics_val["predictions"].extend(pred.cpu().numpy())
             metrics_val["targets"].extend(label.cpu().numpy())
 
-            pbar.set_postfix({"step_loss": loss.detach().cpu().item()})
+            pbar.set_postfix({"step_loss": loss.detach().cpu().item()})r 
 
         epoch_loss_val = metrics_val["running_loss"] / len(loader_val)
         epoch_balanced_accuracy_val = balanced_accuracy_score(metrics_val["targets"], metrics_val["predictions"])
@@ -185,12 +185,6 @@ class NetworkHandler:
         
         optimizer = torch.optim.SGD(self.model.parameters(), lr=0.03, momentum=0.9, weight_decay=0.001)
         torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
-
-        
-        self.model.train()
-        #deactivate the training for encoder if needed
-        if self.freeze_encoder or self.embedding_mode: 
-            self.model.encoder.eval()
     
         
         for i in range(len(loader_source_train)): #maybe change the loop?
