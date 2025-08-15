@@ -4,6 +4,7 @@
 # TODO: concernant les batch --> mettre le nom de toutes les variables au pluriel
 # TODO: data augmentation strategies?? (last)
 # TODO: way too many repetitions between train and validation --> completely possible to create one function with a little if loop to compute or not gradient
+# TODO: bien mettre les tqdm partout
 
 # entrainer sur Akoya et Leica a chaque fois
 
@@ -26,15 +27,16 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
-from deeplake import Dataset as DeepLakeDataset
+import deeplake
 from sklearn.metrics import balanced_accuracy_score
+from geomloss import SamplesLoss
 
 #from .network import Network
 #from .save import save_table
 
-from dataset_OT import multi_WSI_loader 
+from dataset_OT import patches_loader, multi_WSI_loader 
 from architecture_OT import Neural_Network
-from geomloss import SamplesLoss
+
 
 
 # Ensuring reproducibility
@@ -48,8 +50,8 @@ torch.backends.cudnn.benchmark = False
 # Define global variables
 metrics_train = {'running_loss':0, 'predictions':[], 'labels':[]}
 metrics_val = {'running_loss':0, 'predictions':[], 'labels':[]}
-WSI_ids_train = [1,2,3, 4, 5, 6, 7, 8, 9, 10] #to be completed
-WSI_ids_val = [11,12,13,14,15]
+WSI_ids_train = [1] #to be completed
+WSI_ids_val = [2]
 
 # Defining OT-based loss function
 loss_geom = SamplesLoss('sinkhorn', p=2, blur=0.1, scaling=0.95, verbose=False)
@@ -74,7 +76,8 @@ class NetworkHandler:
         self.use_amp = precision == 'mixed' and self.device == 'cuda'
         self.grad_scaler = GradScaler(enabled=self.use_amp)
 
-    def training_no_OT(self, train_scanners):
+    
+    def training_no_OT(self, scanners_train):
         # here we train only using cross entropy
 
 
@@ -85,10 +88,10 @@ class NetworkHandler:
 
         #data loading
         batch_size = 64 #Careful: the number of data loaded is batch_size * number of scanners 
-        dataset_train = multi_WSI_loader(WSI_ids_train, train_scanners, train_or_test='Train')
+        dataset_train = multi_WSI_loader(WSI_ids_train, scanners_train, train_or_test='Train')
         loader_train = DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
 
-    
+        
         self.model.train()
 
         #deactivate the encoder training if needed
@@ -97,18 +100,19 @@ class NetworkHandler:
         
         pbar = tqdm(loader_train, desc='Training with Cross-Entropy in progress')
 
-        for patch, label, *_ in pbar:
+        for batch in pbar:
+            patch = batch['embedding'] if self.embedding_mode else batch['img'].permute(0,3,2,1) #correct axes for Gigapath
             patch = patch.to(self.device)
-            label = label.to(self.device)
+            label = batch['label'].to(self.device)
 
             with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
                 #if embeddings from gigapath are already computed, we can speed up training
                 logits = self.model.bottle_neck(patch) if self.embedding_mode else self.model(patch)
-                loss = nn.CrossEntropy(logits, label)
+                loss = nn.CrossEntropyLoss()(logits, label) #careful about syntax
             
             self.grad_scaler.scale(loss).backward()
             self.grad_scaler.step(optimizer)
-            self.grad_scaler.step()
+            self.grad_scaler.update()
             optimizer.zero_grad()
 
             confidence = F.softmax(logits, dim=1)
@@ -130,32 +134,33 @@ class NetworkHandler:
         self.model.eval()
         
         #we still work with the Train folder
-        dataset_val = multi_WSI_loader(WSI_ids_val, train_scanners, train_or_test='Train')
+        dataset_val = multi_WSI_loader(WSI_ids_val, scanners_train, train_or_test='Train')
         loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
         
         pbar = tqdm(loader_val, desc='Validation with Cross-Entropy in progress')
-        for patch, label, *_ in pbar:
+        for batch in pbar:
+            patch = batch['embedding'] if self.embedding_mode else batch['img'].permute(0,3,2,1) #correct axes for Gigapath
             patch = patch.to(self.device)
-            label = label.to(self.device)
+            label = batch['label'].to(self.device)
 
             with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
                 logits = self.model.bottle_neck(patch) if self.embedding_mode else self.model(patch)
-                loss = nn.CrossEntropy(logits, label)
+                loss = nn.CrossEntropyLoss()(logits, label)
             
             confidence = F.softmax(logits, dim=1)
             pred = torch.argmax(confidence, dim=1)
 
             metrics_val["running_loss"] += loss.detach().cpu().item()
             metrics_val["predictions"].extend(pred.cpu().numpy())
-            metrics_val["targets"].extend(label.cpu().numpy())
+            metrics_val["labels"].extend(label.cpu().numpy())
 
-            pbar.set_postfix({"step_loss": loss.detach().cpu().item()})r 
+            pbar.set_postfix({"step_loss": loss.detach().cpu().item()})
 
         epoch_loss_val = metrics_val["running_loss"] / len(loader_val)
-        epoch_balanced_accuracy_val = balanced_accuracy_score(metrics_val["targets"], metrics_val["predictions"])
+        epoch_balanced_accuracy_val = balanced_accuracy_score(metrics_val["labels"], metrics_val["predictions"])
 
         
-        return epoch_loss_train, epoch_balanced_accuracy_train, epoch_loss_val, epoch_balanced_accuracy_val 
+        return epoch_loss_train, epoch_balanced_accuracy_train, epoch_loss_val, epoch_balanced_accuracy_val
     
 
     def training_OT(self, train_scanners): 
@@ -329,7 +334,7 @@ class NetworkHandler:
             metrics_val['labels'].extend(label_source_val.cpu().numpy())
             metrics_val['labels'].extend(label_target_val.cpu().numpy())
 
-            #pbar.set_postfix({'step_loss': loss_train.detach().cpu().item()})
+            #pbar.set_postfix({'step_loss': loss_val.detach().cpu().item()})
         
         epoch_loss_val = metrics_val['running_loss'] / (len(loader_source_val) + len(loader_target_val))
         epoch_balanced_accuracy_val = balanced_accuracy_score(metrics_val['labels'], metrics_val['predictions'])
@@ -338,7 +343,67 @@ class NetworkHandler:
 
 
 
+    @torch.no_grad()
+    def extract_embeddings(self, scanners, WSI_ids, train_or_test, batch_size):
+        # creates the deeplake database for embeddings
+        # structure: one deeplake dataset per WSI, embeddings, scanner, WSI_id, Train or Test
 
+        root_dir = '/home/leolr-int/nfs/transformed_data/my_embeddings'
+        self.model.eval()
+        for scanner in scanners:
+            for id in WSI_ids:
+
+                path = f'Subset3_{train_or_test}_{id}_{scanner}'
+                final_destination = os.path.join(root_dir, path)
+                os.makedirs(final_destination, exist_ok=True)
+                # creation of the deeplake dataset
+                embedding_ds = deeplake.create(final_destination)
+                embedding_ds.add_column('embedding', dtype=deeplake.types.Embedding(1536)) # correct type?
+                embedding_ds.add_column('scanner', dtype=deeplake.types.Text)
+                embedding_ds.add_column('WSI_id', deeplake.types.Int32)
+                embedding_ds.add_column('train_or_test', dtype=deeplake.types.Text)
+
+                WSI = patches_loader(train_or_test, id, scanner, to_torch=True)
+                loader = DataLoader(WSI, batch_size=batch_size, shuffle=False, num_workers=4)
+                batch_records = []
+
+                for batch in tqdm(loader, desc=f'Extracting {train_or_test}_{id}_{scanner}'):
+                    patches = batch['img'].permute(0,3,2,1).to(self.device).float()
+
+                    with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
+                        embeddings = self.model.encoder(patches)
+                        embeddings = embeddings.detach().cpu().numpy()
+
+                        # accumulate all rows from batch
+                        for emb in embeddings:
+                            batch_records.append({
+                                'embedding':emb,
+                                'WSI_id': id, 
+                                'scanner': scanner,
+                                'train_or_test': train_or_test
+                            })
+
+                        # append in large
+                        if len(batch_records) >= 1000:
+                            embedding_ds.append(batch_records)
+                            batch_records.clear()
+
+                    # append what is left
+                    if batch_records:
+                        embedding_ds.append(batch_records)
+
+
+
+
+# Example:
+'''
+torch.cuda.empty_cache()
+scanners = ['KFBio']
+train_or_test = 'Train'
+WSI_ids = [1,2] 
+batch_size = 64
+NetworkHandler().extract_embeddings(scanners, WSI_ids, train_or_test, batch_size)
+'''
 
    
 

@@ -1,10 +1,7 @@
 import os
-
-import timm
 import torch
 import torch.nn as nn
-from timm.layers import SwiGLUPacked
-from timm.models.vision_transformer import VisionTransformer 
+import random
 
 
 
@@ -45,7 +42,8 @@ class Neural_Network(nn.Module):
         def forward(self, x): 
             if self.freeze_encoder: 
                 with torch.no_grad():
-                    embedding = self.bottle_neck(self.encoder(x))
+                    encoded = self.encoder(x)
+                embedding = self.bottle_neck(encoded)
             else:
                 embedding = self.bottle_neck(self.encoder(x))
             logits = self.head(embedding)

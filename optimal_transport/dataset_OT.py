@@ -10,15 +10,16 @@ class patches_loader(Dataset):
     '''
     Class to handle patches stored as deeplake objects
     '''
-    def __init__(self, train_or_test, WSI_id, scanner, to_torch=False):
-        self.split = train_or_test
+    def __init__(self, train_or_test, WSI_id, scanner, to_torch=False, emb=True):
+        self.train_or_test = train_or_test
         self.WSI_id = WSI_id
         self.scanner = scanner
         directory = f"/home/leolr-int/nfs/data/data/patched/dim_256/{train_or_test}"
         #here we consider only Subset3
-        file = f'Subset3_{train_or_test}_{WSI_id}_{scanner}'
-        self.patches = deeplake.open_read_only(f'{directory}/{file}')
+        WSI = f'Subset3_{train_or_test}_{WSI_id}_{scanner}'
+        self.patches = deeplake.open_read_only(f'{directory}/{WSI}')
         self.to_torch = to_torch
+        self.emb = emb
 
     def summary(self):
         return self.patches.summary()
@@ -43,9 +44,21 @@ class patches_loader(Dataset):
                 "h": h,
                 }
             
-            return {'patch':img, 'label':label, 'metadata': metadata}
+            dic = {'img':img, 'label':label, 'metadata': metadata}
+
+            if self.emb:
+                # connection to embeddings
+                directory = '/home/leolr-int/nfs/transformed_data/my_embeddings'
+                WSI = f'Subset3_{self.train_or_test}_{self.WSI_id}_{self.scanner}'
+                embedding_ds = deeplake.open_read_only(f'{directory}/{WSI}')
+                embedding = embedding_ds[idx]['embedding']
+                embedding = torch.tensor(embedding, dtype=torch.float)
+                dic['embedding'] = embedding
+            
+            return dic
             
         else: 
+            #deeplake object
             return self.patches[idx]
             # Example: patches[idx]['label']
 
@@ -57,11 +70,30 @@ class patches_loader(Dataset):
         axes.imshow(self.patches[idx]["patch"])
         plt.show()
 
+    
+    def to_embedding(self, idx=None):
+        # connection to embeddings
+        directory = '/home/leolr-int/nfs/transformed_data/my_embeddings'
+        WSI = f'Subset3_{self.train_or_test}_{self.WSI_id}_{self.scanner}'
+        embedding_ds = deeplake.open_read_only(f'{directory}/{WSI}')
+        if idx == None:
+            embeddings_np = np.array(embedding_ds['embedding'])  # stack into 1 array
+            embeddings_tensor = torch.from_numpy(embeddings_np).float()
+            return embeddings_tensor 
+        else:
+            embedding = embedding_ds[idx]['embedding']
+            embedding = torch.tensor(embedding, dtype=torch.long)
+        return embedding
+      
+
+
 # Example
-'''file_test = patches_loader('Train', 1, 'Akoya', to_torch=True)
-file_test.display(200)
-file_test[200]['label']
-file_test.summary()'''
+'''idx=1500
+file_test = patches_loader('Train', 1, 'KFBio', to_torch=True)
+file_test.display(idx)
+#file_test.summary()
+print(file_test.to_embedding(idx))
+file_test[idx]['label'] == 3'''
 
 
 class multi_WSI_loader(Dataset):
@@ -100,7 +132,7 @@ class multi_WSI_loader(Dataset):
 # Example 
 '''
 train_scanners = ['Akoya', 'Leica']
-WSI_ids = [1,2,3]
+WSI_ids = [1,2]
 target_scanner = ['Akoya'] if 'Akoya' in train_scanners else random.choice(train_scanners)
 train_scanners.remove(target_scanner[0])
 source_scanner = train_scanners
@@ -114,22 +146,23 @@ source_dataset = multi_WSI_loader(WSI_ids, source_scanner, train_or_test='Train'
 
 # DataLoaders
 batch_size = 16
-train_loader_source = DataLoader(source_dataset, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
-train_loader_target = DataLoader(target_dataset, batch_size=batch_size, shuffle=True, num_workers=2, drop_last=True)
+train_loader_source = DataLoader(source_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
+train_loader_target = DataLoader(target_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
 
 
 for batch in train_loader_source:
-    images = batch['patch']
+    images = batch['img']
     labels = batch['label']
-    metadata = batch['metadata']
+    
     print("Source batch - Images shape:", images.shape, "Labels:", labels)
     break
 
 for batch in train_loader_target:
-    images = batch['patch']
+    images = batch['img'].permute(0,3,2,1)
     labels = batch['label']
-    metadata = batch['metadata']
-    print("Target batch - Images shape:", images.shape, "Labels:", labels)
+    embeddings = batch['embedding']
+    
+    print("Target batch - Images shape:", images.shape, "Labels:", labels, "Emb:", embeddings.shape)
     break
 '''
 
