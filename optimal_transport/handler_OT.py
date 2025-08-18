@@ -23,12 +23,15 @@ import random
 import torch
 import numpy as np
 import torch.nn as nn
+import matplotlib.pyplot as plt
+import time
+import pandas as pd
 from tqdm import tqdm
 import torch.nn.functional as F
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 import deeplake
-from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix, ConfusionMatrixDisplay
 from geomloss import SamplesLoss
 
 #from .network import Network
@@ -48,8 +51,6 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False 
 
 # Define global variables
-metrics_train = {'running_loss':0, 'predictions':[], 'labels':[]}
-metrics_val = {'running_loss':0, 'predictions':[], 'labels':[]}
 WSI_ids_train = [1] #to be completed
 WSI_ids_val = [2]
 
@@ -77,90 +78,110 @@ class NetworkHandler:
         self.grad_scaler = GradScaler(enabled=self.use_amp)
 
     
-    def training_no_OT(self, scanners_train):
+    def training_no_OT(self, scanners_train, num_epochs):
         # here we train only using cross entropy
-
-
-        # 1st part: training for one epoch
-
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.03, momentum=0.9, weight_decay=0.001)
-        torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
-
-        #data loading
-        batch_size = 64 #Careful: the number of data loaded is batch_size * number of scanners 
-        dataset_train = multi_WSI_loader(WSI_ids_train, scanners_train, train_or_test='Train')
-        loader_train = DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
-
+        training_stats = []
         
-        self.model.train()
+        for i in range(0, num_epochs):
 
-        #deactivate the encoder training if needed
-        if self.freeze_encoder or self.embedding_mode: 
-            self.model.encoder.eval()
-        
-        pbar = tqdm(loader_train, desc='Training with Cross-Entropy in progress')
-
-        for batch in pbar:
-            patch = batch['embedding'] if self.embedding_mode else batch['img'].permute(0,3,2,1) #correct axes for Gigapath
-            patch = patch.to(self.device)
-            label = batch['label'].to(self.device)
-
-            with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
-                #if embeddings from gigapath are already computed, we can speed up training
-                logits = self.model.bottle_neck(patch) if self.embedding_mode else self.model(patch)
-                loss = nn.CrossEntropyLoss()(logits, label) #careful about syntax
+            metrics_train = {'running_loss': 0, 'predictions': [], 'labels': []}
+            metrics_val   = {'running_loss': 0, 'predictions': [], 'labels': []}
             
-            self.grad_scaler.scale(loss).backward()
-            self.grad_scaler.step(optimizer)
-            self.grad_scaler.update()
-            optimizer.zero_grad()
-
-            confidence = F.softmax(logits, dim=1)
-            pred = torch.argmax(confidence, dim=1)
+            start = time.time()
+            # 1st part: training for one epoch
+    
+            optimizer = torch.optim.SGD(self.model.parameters(), lr=0.03, momentum=0.9, weight_decay=0.001)
+            torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99)
+    
+            #data loading
+            #batch_size = 64 #Careful: the number of data loaded is batch_size * number of scanners 
+            dataset_train = multi_WSI_loader(WSI_ids_train, scanners_train, train_or_test='Train')
+            loader_train = DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
+    
             
-            #performance metrics
-            metrics_train['running_loss'] += loss.detach().cpu().item()
-            metrics_train['predictions'].extend(pred.cpu().numpy())
-            metrics_train['labels'].extend(label.cpu().numpy())
-
-            pbar.set_postfix({'step_loss': loss.detach().cpu().item()})
-        
-        epoch_loss_train = metrics_train['running_loss'] / len(loader_train)
-        epoch_balanced_accuracy_train = balanced_accuracy_score(metrics_train['labels'], metrics_train['predictions'])
-        
-
-        # 2nd part: validation for one epoch (WHAT ABOUT torch.no_grad() ??????)
-        
-        self.model.eval()
-        
-        #we still work with the Train folder
-        dataset_val = multi_WSI_loader(WSI_ids_val, scanners_train, train_or_test='Train')
-        loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
-        
-        pbar = tqdm(loader_val, desc='Validation with Cross-Entropy in progress')
-        for batch in pbar:
-            patch = batch['embedding'] if self.embedding_mode else batch['img'].permute(0,3,2,1) #correct axes for Gigapath
-            patch = patch.to(self.device)
-            label = batch['label'].to(self.device)
-
-            with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
-                logits = self.model.bottle_neck(patch) if self.embedding_mode else self.model(patch)
-                loss = nn.CrossEntropyLoss()(logits, label)
+            self.model.train()
+    
+            #deactivate the encoder training if needed
+            if self.freeze_encoder or self.embedding_mode: 
+                self.model.encoder.eval()
             
-            confidence = F.softmax(logits, dim=1)
-            pred = torch.argmax(confidence, dim=1)
+            pbar = tqdm(loader_train, desc='Training with Cross-Entropy in progress')
+    
+            for batch in pbar:
+                patch = batch['embedding'] if self.embedding_mode else batch['img'].permute(0,3,2,1) #correct axes for Gigapath
+                patch = patch.to(self.device)
+                label = batch['label'].to(self.device)
+    
+                with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
+                    #if embeddings from gigapath are already computed, we can speed up training
+                    logits = self.model.bottle_neck(patch) if self.embedding_mode else self.model(patch)
+                    loss = nn.CrossEntropyLoss()(logits, label) #careful about syntax
+                
+                self.grad_scaler.scale(loss).backward()
+                self.grad_scaler.step(optimizer)
+                self.grad_scaler.update()
+                optimizer.zero_grad()
+    
+                confidence = F.softmax(logits, dim=1)
+                pred = torch.argmax(confidence, dim=1)
+                
+                #performance metrics
+                metrics_train['running_loss'] += loss.detach().cpu().item()
+                metrics_train['predictions'].extend(pred.cpu().numpy())
+                metrics_train['labels'].extend(label.cpu().numpy())
+    
+                pbar.set_postfix({'step_loss': loss.detach().cpu().item()})
+            
+            epoch_loss_train = metrics_train['running_loss'] / len(loader_train)
+            epoch_balanced_accuracy_train = balanced_accuracy_score(metrics_train['labels'], metrics_train['predictions'])
+            
+    
+            # 2nd part: validation for one epoch (WHAT ABOUT torch.no_grad() ??????)
+            
+            self.model.eval()
+            
+            #we still work with the Train folder
+            dataset_val = multi_WSI_loader(WSI_ids_val, scanners_train, train_or_test='Train')
+            loader_val = DataLoader(dataset_val, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
+            
+            pbar = tqdm(loader_val, desc='Validation with Cross-Entropy in progress')
+            for batch in pbar:
+                patch = batch['embedding'] if self.embedding_mode else batch['img'].permute(0,3,2,1) #correct axes for Gigapath
+                patch = patch.to(self.device)
+                label = batch['label'].to(self.device)
+    
+                with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
+                    logits = self.model.bottle_neck(patch) if self.embedding_mode else self.model(patch)
+                    loss = nn.CrossEntropyLoss()(logits, label)
+                
+                confidence = F.softmax(logits, dim=1)
+                pred = torch.argmax(confidence, dim=1)
+    
+                metrics_val["running_loss"] += loss.detach().cpu().item()
+                metrics_val["predictions"].extend(pred.cpu().numpy())
+                metrics_val["labels"].extend(label.cpu().numpy())
+    
+                pbar.set_postfix({"step_loss": loss.detach().cpu().item()})
+    
+            epoch_loss_val = metrics_val["running_loss"] / len(loader_val)
+            epoch_balanced_accuracy_val = balanced_accuracy_score(metrics_val["labels"], metrics_val["predictions"])
+            
+            cm = confusion_matrix(metrics_val["predictions"], metrics_val["labels"], labels=[0, 1, 2, 3, 4], normalize='true')
 
-            metrics_val["running_loss"] += loss.detach().cpu().item()
-            metrics_val["predictions"].extend(pred.cpu().numpy())
-            metrics_val["labels"].extend(label.cpu().numpy())
+            end = time.time()
 
-            pbar.set_postfix({"step_loss": loss.detach().cpu().item()})
+            dic = {'epoch_loss_train': epoch_loss_train, 
+                'epoch_balanced_accuracy_train': epoch_balanced_accuracy_train, 
+                'epoch_loss_val': epoch_loss_val, 
+                'epoch_balanced_accuracy_val': epoch_balanced_accuracy_val, 
+                'time': end - start,
+                'cm':cm}
 
-        epoch_loss_val = metrics_val["running_loss"] / len(loader_val)
-        epoch_balanced_accuracy_val = balanced_accuracy_score(metrics_val["labels"], metrics_val["predictions"])
-
-        
-        return epoch_loss_train, epoch_balanced_accuracy_train, epoch_loss_val, epoch_balanced_accuracy_val
+            training_stats.append(dic)
+            
+            train_plot(pd.DataFrame(training_stats), cm)
+            
+        return None
     
 
     def training_OT(self, train_scanners): 
@@ -392,11 +413,54 @@ class NetworkHandler:
                     if batch_records:
                         embedding_ds.append(batch_records)
 
+def train_plot(training_stats, cm):
+    fig, axes = plt.subplots(2,2, figsize=(10,10))
+    # loss curves
+    axes[0,0].plot(training_stats['epoch_loss_train'], label='Training loss', color='blue')
+    axes[0,0].plot(training_stats['epoch_loss_val'], label='Validation loss', color='green')
+    axes[0,0].set_xlabel('Epoch')
+    axes[0,0].set_ylabel('Loss')
+    axes[0,0].legend()
+    axes[0,0].set_title('Loss per epoch')
 
+    # accuracy curves
+    axes[0,1].plot(training_stats['epoch_balanced_accuracy_train'], label='Training accuracy', color='blue')
+    axes[0,1].plot(training_stats['epoch_balanced_accuracy_val'], label='Validation accuracy', color='green')
+    axes[0,1].set_xlabel('Epoch')
+    axes[0,1].set_ylabel('Accuracy')
+    axes[0,1].legend()
+    axes[0,1].set_title('Accuracy per epoch')
+
+    # time per epoch
+    axes[1,0].plot(training_stats['time'], color='black')
+    axes[1,0].set_xlabel('Epoch')
+    axes[1,0].set_ylabel('Time')
+    axes[1,0].set_title('Time for each epoch')
+
+    # confusion matrix
+    label_name = ['Stroma', 'Normal', 'G3', 'G4', 'G5']
+    display = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=label_name)
+    display.plot(ax=axes[1,1], cmap='PuRd')
+    axes[1,1].set_title('Confusion matrix for validation')
+
+    plt.suptitle('Training statistics')
+    plt.savefig('training_stats.png')
+    plt.close()
 
 
 # Example:
 '''
+torch.cuda.empty_cache()
+scanners_train = ['Akoya', 'Leica']
+train_or_test = 'Train'
+batch_size = 64
+training_stats = []
+handler = NetworkHandler(embedding_mode=True)
+
+num_epochs = 20
+handler.training_no_OT(scanners_train, num_epochs)
+
+
 torch.cuda.empty_cache()
 scanners = ['KFBio']
 train_or_test = 'Train'
