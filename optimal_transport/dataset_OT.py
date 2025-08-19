@@ -3,7 +3,40 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import deeplake 
 import torch
+from PIL import Image
+from torchvision import transforms
+from torch.utils.data import DataLoader, ConcatDataset
 
+
+class ToPILCheck:
+    def __call__(self, img):
+        if isinstance(img, Image.Image):
+            return img
+
+        else:
+            return transforms.ToPILImage()(img)
+        
+
+class RGBCheck:
+    def __call__(self, img: Image):
+        return img.convert("RGB")
+
+
+        
+def resize(img: np.ndarray | Image.Image) -> torch.Tensor:
+    
+    img_transform = transforms.Compose([
+        ToPILCheck(),
+        RGBCheck(),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()])
+        
+
+    transformed = img_transform(img)
+
+    return transformed
+
+'''transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))'''
 
 
 class patches_loader(Dataset):
@@ -28,7 +61,18 @@ class patches_loader(Dataset):
     def __getitem__(self, idx):
         if self.to_torch:
             patch = self.patches[idx]
-            img = torch.tensor(patch['patch'])
+            
+            img = patch["patch"].copy()
+    
+            '''if preprocess_fn is not None:
+                img = preprocess_fn(img)
+        
+            if apply_augmentation:
+                img = augment_fn(img)'''
+        
+            img = resize(img)
+            
+            #img = torch.tensor(img)
             label = torch.tensor(patch["label"], dtype=torch.long)
             area = torch.tensor(patch["area"], dtype=torch.long)
             x = torch.tensor(patch["x"], dtype=torch.long)
@@ -82,18 +126,20 @@ class patches_loader(Dataset):
             return embeddings_tensor 
         else:
             embedding = embedding_ds[idx]['embedding']
-            embedding = torch.tensor(embedding, dtype=torch.long)
+            embedding = torch.tensor(embedding, dtype=torch.float)
         return embedding
       
 
 
 # Example
 '''idx=1500
-file_test = patches_loader('Train', 1, 'KFBio', to_torch=True)
+file_test = patches_loader('Train', 1, 'Leica', to_torch=True)
 file_test.display(idx)
+file_test[idx]['img'].shape
 #file_test.summary()
-print(file_test.to_embedding(idx))
-file_test[idx]['label'] == 3'''
+#print(file_test.to_embedding())
+#file_test[idx]['embedding'] #use this form only when to_torch = True
+#file_test.to_embedding(idx)'''
 
 
 class multi_WSI_loader(Dataset):
@@ -102,31 +148,46 @@ class multi_WSI_loader(Dataset):
     Used for training a neural network
     '''
 
-    def __init__(self, WSI_ids, scanners, train_or_test='Train'):
+    def __init__(self, WSI_ids, scanner, train_or_test='Train'):
         self.train_or_test = train_or_test
         self.WSI_ids = WSI_ids
-        self.scanners = scanners
+        self.scanner = scanner
         
         # dictionary to store all the patches_loader objects
         self.datasets = []
-        for scanner in scanners:
-            for WSI_id in WSI_ids: 
-                ds = patches_loader(train_or_test, WSI_id, scanner, to_torch=True)
-                self.datasets.append(ds)
+        
+        for WSI_id in WSI_ids: 
+            ds = patches_loader(train_or_test, WSI_id, scanner, to_torch=True)
+            _ = len(ds)
+            self.datasets.append(ds)
 
         # index mapping
         self.index_map = []
         for ds_idx, ds in enumerate(self.datasets):
             for i in range(len(ds)):
                 self.index_map.append((ds_idx, i))
-            
+
+
     # define indexing so that the dataloader can access data    
     def __getitem__(self, idx):
-        ds_idx, sample_idx = self.index_map[idx]
-        return self.datasets[ds_idx][sample_idx] #which is a patches_loader object
+        ds_idx, patch_idx = self.index_map[idx]
+        return self.datasets[ds_idx][patch_idx] #which is a patches_loader object
     
     def __len__(self):
         return len(self.index_map)
+
+
+def make_multi_WSI_loader(WSI_ids, scanners, train_or_test, batch_size):
+    datasets = []
+    
+    for scanner in scanners:
+        dataset = multi_WSI_loader(WSI_ids, scanner, train_or_test)
+        datasets.append(dataset)
+    
+    datasets = ConcatDataset(datasets)
+    loader = DataLoader(datasets, batch_size=64, shuffle=True)
+
+    return loader
     
 
 # Example 
