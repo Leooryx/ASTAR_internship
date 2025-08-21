@@ -1,5 +1,5 @@
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import matplotlib.pyplot as plt
 import deeplake 
 import torch
@@ -42,7 +42,8 @@ class patches_loader(Dataset):
     '''
     Class to handle patches stored as deeplake objects
     '''
-    def __init__(self, train_or_test, WSI_id, scanner, to_torch=False, emb_mode=True):
+    def __init__(self, subset, train_or_test, WSI_id, scanner, to_torch=False, emb_mode=True):
+        self.subset = subset
         self.train_or_test = train_or_test
         self.WSI_id = WSI_id
         self.scanner = scanner
@@ -56,7 +57,11 @@ class patches_loader(Dataset):
             directory = f"/home/leolr-int/nfs/data/data/patched/dim_256/{train_or_test}"
         
         #here we consider only Subset3
-        WSI = f'Subset3_{train_or_test}_{WSI_id}_{scanner}'
+        
+        if self.subset == 'Subset1':
+            WSI = f'{subset}_{train_or_test}_{WSI_id}'
+        else:
+            WSI = f'{subset}_{train_or_test}_{WSI_id}_{scanner}'
         self.patches = deeplake.open_read_only(f'{directory}/{WSI}')
         
 
@@ -103,10 +108,14 @@ class patches_loader(Dataset):
                 
                 dic = {'img':img, 'label':label, 'metadata': metadata}
 
-                if self.emb:
+                if self.emb_mode:
                     # connection to embeddings
                     directory = '/home/leolr-int/nfs/transformed_data/my_embeddings'
-                    WSI = f'Subset3_{self.train_or_test}_{self.WSI_id}_{self.scanner}'
+                    
+                    if self.subset == 'Subset1':
+                        WSI = f'{self.subset}_{self.train_or_test}_{self.WSI_id}'
+                    else:
+                        WSI = f'{self.subset}_{self.train_or_test}_{self.WSI_id}_{self.scanner}'
                     embedding_ds = deeplake.open_read_only(f'{directory}/{WSI}')
                     embedding = embedding_ds[idx]['embedding']
                     embedding = torch.tensor(embedding, dtype=torch.float)
@@ -131,7 +140,10 @@ class patches_loader(Dataset):
     def to_embedding(self, idx=None):
         # connection to embeddings
         directory = '/home/leolr-int/nfs/transformed_data/my_embeddings'
-        WSI = f'Subset3_{self.train_or_test}_{self.WSI_id}_{self.scanner}'
+        if self.subset == 'Subset1':
+            WSI = f'{self.subset}_{self.train_or_test}_{self.WSI_id}'
+        else:
+            WSI = f'{self.subset}_{self.train_or_test}_{self.WSI_id}_{self.scanner}'
         embedding_ds = deeplake.open_read_only(f'{directory}/{WSI}')
         if idx == None:
             embeddings_np = np.array(embedding_ds['embedding'])  # stack into 1 array
@@ -159,7 +171,8 @@ class multi_WSI_loader(Dataset):
     Used for training a neural network
     '''
 
-    def __init__(self, WSI_ids, scanner, train_or_test='Train'):
+    def __init__(self, subset, WSI_ids, scanner, train_or_test='Train'):
+        self.subset = subset
         self.train_or_test = train_or_test
         self.WSI_ids = WSI_ids
         self.scanner = scanner
@@ -168,7 +181,7 @@ class multi_WSI_loader(Dataset):
         self.datasets = []
         
         for WSI_id in WSI_ids: 
-            ds = patches_loader(train_or_test, WSI_id, scanner, to_torch=True)
+            ds = patches_loader(subset, train_or_test, WSI_id, scanner, to_torch=True)
             _ = len(ds)
             self.datasets.append(ds)
 
@@ -188,15 +201,15 @@ class multi_WSI_loader(Dataset):
         return len(self.index_map)
 
 
-def make_multi_WSI_loader(WSI_ids, scanners, train_or_test, batch_size):
+def make_multi_WSI_loader(subset, WSI_ids, scanners, train_or_test, batch_size):
     datasets = []
     
     for scanner in scanners:
-        dataset = multi_WSI_loader(WSI_ids, scanner, train_or_test)
+        dataset = multi_WSI_loader(subset, WSI_ids, scanner, train_or_test)
         datasets.append(dataset)
     
     datasets = ConcatDataset(datasets)
-    loader = DataLoader(datasets, batch_size=64, shuffle=True, num_workers=6)
+    loader = DataLoader(datasets, batch_size=64, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True)
 
     return loader
 
@@ -205,6 +218,7 @@ def make_multi_WSI_loader(WSI_ids, scanners, train_or_test, batch_size):
 '''Test = False
 
 if Test: 
+    subset = 'Subset3'
     train_scanners = ['Akoya', 'Leica', 'KFBio']
     WSI_ids = [1,2]
     target_scanner = ['Akoya'] if 'Akoya' in train_scanners else random.choice(train_scanners)
@@ -214,14 +228,14 @@ if Test:
     print(target_scanner)
     print(source_scanner)
     
-    target_dataset = multi_WSI_loader(WSI_ids, target_scanner, train_or_test='Train')
-    source_dataset = multi_WSI_loader(WSI_ids, source_scanner, train_or_test='Train')
+    target_dataset = multi_WSI_loader(subset, WSI_ids, target_scanner, train_or_test='Train')
+    source_dataset = multi_WSI_loader(subset, WSI_ids, source_scanner, train_or_test='Train')
     
     
     # DataLoaders
     batch_size = 16
-    train_loader_source = DataLoader(source_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
-    train_loader_target = DataLoader(target_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
+    train_loader_source = DataLoader(source_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True, pin_memory=True)
+    train_loader_target = DataLoader(target_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True, pin_memory=True)
     
     
     for batch in train_loader_source:
