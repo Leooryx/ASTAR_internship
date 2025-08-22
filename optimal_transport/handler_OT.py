@@ -651,6 +651,81 @@ NetworkHandler().extract_embeddings(scanners, WSI_ids, train_or_test, batch_size
 
 
 
+# new embeddings extraction: one deeplake dataset + config_extraction
+@torch.no_grad()
+def extract_embeddings(self, extraction_config, batch_size):
+    
+    root_dir = '/home/leolr-int/nfs/transformed_data/all_embeddings'
+    os.makedirs(root_dir, exist_ok=True)
+    embedding_ds = deeplake.create(root_dir)
+    embedding_ds.add_column('embedding', dtype=deeplake.types.Embedding(1536)) 
+    embedding_ds.add_column('subset', dtype=deeplake.types.Text)
+    embedding_ds.add_column('scanner', dtype=deeplake.types.Text)
+    embedding_ds.add_column('WSI_id', deeplake.types.Int32)
+    embedding_ds.add_column('train_or_test', dtype=deeplake.types.Text)
+    embedding_ds.add_column('label', dtype=deeplake.types.Int32)
+    
+    self.model.eval()
+    
+    for config in extraction_config:
+        subset = config['subset']
+        scanner = config['scanner'] 
+        WSI_ids = config['WSI_ids']
+        train_or_test = config['train_or_test']
+        
+        for wsi_id in WSI_ids:
+
+            WSI = patches_loader(subset, train_or_test, wsi_id, scanner, to_torch=True, emb_mode=False)
+            loader = DataLoader(WSI, batch_size=batch_size, shuffle=False, num_workers=6, pin_memory=True)
+            batch_records = []
+
+            for batch in tqdm(loader, desc=f'{subset}_{wsi_id}_{scanner[0]}'):
+                patches = batch['img'].to(self.device).float()
+                labels = batch['label']
+
+                with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
+                    embeddings = self.model.encoder(patches)
+                    embeddings = embeddings.detach().cpu().numpy()
+
+                    # accumulate all rows from batch
+                    for emb, label in zip(embeddings, labels):
+                        batch_records.append({
+                            'embedding':emb,
+                            'subset': subset,
+                            'WSI_id': wsi_id, 
+                            'scanner': 'Akoya' if subset == 'Subset1' else scanner,
+                            'train_or_test': train_or_test,
+                            'label': label})
+
+                    # append in large
+                    if len(batch_records) >= 1000:
+                        embedding_ds.append(batch_records)
+                        batch_records.clear()
+
+                # append what is left
+                if batch_records:
+                    embedding_ds.append(batch_records)
+    print('finish')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Eric's code
 
 class NetworkHandler:
 
@@ -941,3 +1016,26 @@ def save_checkpoint(
     }
 
     torch.save(training_state, os.path.join(save_dir, "checkpoint.pth"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
