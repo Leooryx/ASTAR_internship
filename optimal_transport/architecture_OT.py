@@ -2,10 +2,6 @@ import torch
 import torch.nn as nn
 import random
 
-import torch
-import torch.nn as nn
-import random
-
 class Network(nn.Module):
     """
     Initialises an Artificial Neural Network with the foundation encoder Gigapath 
@@ -48,7 +44,8 @@ class Network(nn.Module):
             nn.Dropout(p=0.5))
 
         # Define classification head
-        self.head = nn.Linear(1024, num_classes)
+        out_dim = num_classes
+        self.head = nn.Linear(1024, out_dim)
 
     # Define sequential architecture
     def forward(self, x): 

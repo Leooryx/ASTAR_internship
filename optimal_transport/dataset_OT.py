@@ -1,5 +1,5 @@
 import numpy as np
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import deeplake 
 import torch
@@ -60,10 +60,16 @@ class patches_loader(Dataset):
         
         if self.subset == 'Subset1':
             WSI = f'{subset}_{train_or_test}_{WSI_id}'
+            scanner = 'Akoya'
         else:
             WSI = f'{subset}_{train_or_test}_{WSI_id}_{scanner}'
         self.patches = deeplake.open_read_only(f'{directory}/{WSI}')
+
         
+        #test to delete later maybe
+        '''ds = deeplake.open_read_only('/home/leolr-int/nfs/transformed_data/all_embeddings')
+        sql_query = f"SELECT * WHERE scanner = '{scanner}' AND subset = '{subset}' AND WSI_id = {WSI_id}"
+        self.patches = ds.query(sql_query)'''
 
     def summary(self):
         return self.patches.summary()
@@ -200,7 +206,7 @@ class multi_WSI_loader(Dataset):
     def __len__(self):
         return len(self.index_map)
 
-
+#deprecated
 def make_multi_WSI_loader(subset, WSI_ids, scanners, train_or_test, batch_size):
     datasets = []
     
@@ -209,7 +215,7 @@ def make_multi_WSI_loader(subset, WSI_ids, scanners, train_or_test, batch_size):
         datasets.append(dataset)
     
     datasets = ConcatDataset(datasets)
-    loader = DataLoader(datasets, batch_size=64, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True)
+    loader = DataLoader(datasets, batch_size=batch_size, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True)
 
     return loader
 
@@ -257,7 +263,95 @@ if Test:
 
 
 
-#### CLAUDE'S SOLUTION (one train epoch is about 1min49s)
+
+
+
+
+
+
+### SQL BASED QUERIES TO DATA LOADER (mine)
+extraction_config = [
+            {'subset': 'Subset1', 'scanners': 'Akoya', 'WSI_ids': list(range(1,52+1)), 'train_or_test': 'Train'},
+            {'subset': 'Subset3', 'scanners': 'Akoya', 'WSI_ids': list(range(1,26+1)), 'train_or_test': 'Train'},
+            {'subset': 'Subset3', 'scanners': 'Leica', 'WSI_ids': list(range(1,26+1)), 'train_or_test': 'Train'}
+        ]
+
+def random_split(idx_range, split_ratio=0.7):
+    random.shuffle(idx_range)
+    num_train = int(np.ceil(split_ratio * len(idx_range)))
+    return idx_range[:num_train], idx_range[num_train:]
+
+def embedding_transform_fn(row):
+    embedding = torch.tensor(row["embedding"])
+    label = torch.tensor(row["label"], dtype=torch.long)
+    #subset = torch.tensor(row["subset"], dtype=torch.str)
+    #scanner = torch.tensor(row["scanner"], dtype=torch.str)
+    #WSI_id = torch.tensor(row["WSI_id"], dtype=torch.long)
+    #train_or_test = torch.tensor(row["train_or_test"], dtype=torch.str)
+
+    return {'embedding': embedding, 'label': label}
+
+
+   
+def split(extraction_config, batch_size):
+    #no need to specify 'Train' for the dataset because the split is obvioulsy for it
+    line_query_train = []
+    line_query_val = []
+
+    for config in extraction_config:
+        config['train_idx'], config['val_idx'] = random_split(config['WSI_ids'])
+
+        line_query_train.append(f"(scanner = '{config['scanners'][0]}' AND subset = '{config['subset']}' AND WSI_id IN {tuple(config['train_idx'])})")
+        line_query_val.append(f"(scanner = '{config['scanners'][0]}' AND subset = '{config['subset']}' AND WSI_id IN {tuple(config['val_idx'])})")
+
+    # Join the conditions with " OR "
+    where_clause_train = " OR ".join(line_query_train)
+    where_clause_val = " OR ".join(line_query_val)
+    
+    # Construct the full SQL query
+    sql_query_train = f"SELECT * WHERE {where_clause_train}"
+    sql_query_val = f"SELECT * WHERE {where_clause_val}"
+    print(sql_query_val)
+
+    #from deeplake to dataloader
+    ds = deeplake.open_read_only('/home/leolr-int/nfs/transformed_data/all_embeddings')
+    print(ds.summary())
+
+    ds_train = ds.query(sql_query_train).pytorch(transform=embedding_transform_fn)
+    ds_val = ds.query(sql_query_val).pytorch(transform=embedding_transform_fn)
+
+    loader_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    loader_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+
+    return loader_train, loader_val
+
+TRAIN = False 
+if TRAIN:
+    batch_size=64
+    loader_train, loader_val = split(extraction_config, batch_size)
+    print(len(loader_train))
+    print(len(loader_val))
+    
+    
+    
+    scanners_train = ['Akoya', 'Leica'] #add Leica later
+    train_or_test = 'Train'
+    WSI_ids_train = [i for i in range(1,26+1)] #for testing
+    WSI_ids_val = [i for i in range(1,26+1)] #i have to be sure that all labels are represented in validation data
+    batch_size = 64
+    subset = 'Subset3'
+    training_stats = []
+    handler = NetworkHandler(emb_mode=True)
+    save_dir = '/home/leolr-int/nfs/transformed_data/weights'
+    custom_name = 'test_deeplake_all'
+    
+    num_epochs = 50
+    handler.training_no_OT(scanners_train, batch_size, num_epochs)
+#####################################
+
+
+### Loading data technique that works fast, used for baseline:
+
 from torch.utils.data import Dataset, DataLoader, random_split, ConcatDataset, WeightedRandomSampler
 import numpy as np
 from typing import List, Tuple, Optional
@@ -470,91 +564,5 @@ def create_optimized_loaders():
 # Example usage
 if __name__ == "__main__":
     loader_train, loader_val = create_optimized_loaders()
-    print(f"Training batches per epoch: {len(loader_train)}")
-    print(f"Validation batches per epoch: {len(loader_val)}")
-
-#### END OF CLAUDE'S SOLUTION (one train epoch is about 1min49s)
-
-
-
-
-
-
-### SQL BASED QUERIES TO DATA LOADER (mine)
-extraction_config = [
-            {'subset': 'Subset1', 'scanners': 'Akoya', 'WSI_ids': list(range(1,52+1)), 'train_or_test': 'Train'},
-            {'subset': 'Subset3', 'scanners': 'Akoya', 'WSI_ids': list(range(1,26+1)), 'train_or_test': 'Train'},
-            {'subset': 'Subset3', 'scanners': 'Leica', 'WSI_ids': list(range(1,26+1)), 'train_or_test': 'Train'}
-        ]
-
-def random_split(idx_range, split_ratio=0.7):
-    random.shuffle(idx_range)
-    num_train = int(np.ceil(split_ratio * len(idx_range)))
-    return idx_range[:num_train], idx_range[num_train:]
-
-def embedding_transform_fn(row):
-    embedding = torch.tensor(row["embedding"])
-    label = torch.tensor(row["label"], dtype=torch.long)
-    #subset = torch.tensor(row["subset"], dtype=torch.str)
-    #scanner = torch.tensor(row["scanner"], dtype=torch.str)
-    #WSI_id = torch.tensor(row["WSI_id"], dtype=torch.long)
-    #train_or_test = torch.tensor(row["train_or_test"], dtype=torch.str)
-
-    return {'embedding': embedding, 'label': label}
-
-
-   
-def split(extraction_config, batch_size):
-    #no need to specify 'Train' for the dataset because the split is obvioulsy for it
-    line_query_train = []
-    line_query_val = []
-
-    for config in extraction_config:
-        config['train_idx'], config['val_idx'] = random_split(config['WSI_ids'])
-
-        line_query_train.append(f"(scanner = '{config['scanners'][0]}' AND subset = '{config['subset']}' AND WSI_id IN {tuple(config['train_idx'])})")
-        line_query_val.append(f"(scanner = '{config['scanners'][0]}' AND subset = '{config['subset']}' AND WSI_id IN {tuple(config['val_idx'])})")
-
-    # Join the conditions with " OR "
-    where_clause_train = " OR ".join(line_query_train)
-    where_clause_val = " OR ".join(line_query_val)
-    
-    # Construct the full SQL query
-    sql_query_train = f"SELECT * WHERE {where_clause_train}"
-    sql_query_val = f"SELECT * WHERE {where_clause_val}"
-    print(sql_query_val)
-
-    #from deeplake to dataloader
-    ds = deeplake.open_read_only('/home/leolr-int/nfs/transformed_data/all_embeddings')
-    print(ds.summary())
-
-    ds_train = ds.query(sql_query_train).pytorch(transform=embedding_transform_fn)
-    ds_val = ds.query(sql_query_val).pytorch(transform=embedding_transform_fn)
-
-    loader_train = DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-    loader_val = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-
-    return loader_train, loader_val
-
-TRAIN = False 
-if TRAIN:
-    batch_size=64
-    loader_train, loader_val = split(extraction_config, batch_size)
-    print(len(loader_train))
-    print(len(loader_val))
-    
-    
-    
-    scanners_train = ['Akoya', 'Leica'] #add Leica later
-    train_or_test = 'Train'
-    WSI_ids_train = [i for i in range(1,26+1)] #for testing
-    WSI_ids_val = [i for i in range(1,26+1)] #i have to be sure that all labels are represented in validation data
-    batch_size = 64
-    subset = 'Subset3'
-    training_stats = []
-    handler = NetworkHandler(emb_mode=True)
-    save_dir = '/home/leolr-int/nfs/transformed_data/weights'
-    custom_name = 'test_deeplake_all'
-    
-    num_epochs = 50
-    handler.training_no_OT(scanners_train, batch_size, num_epochs)
+    print(f"Training batches per epoch: {len(loader_train)}") #34k
+    print(f"Validation batches per epoch: {len(loader_val)}") #~15k
