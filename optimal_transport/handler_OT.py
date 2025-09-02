@@ -29,18 +29,17 @@ from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 import deeplake
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, ConfusionMatrixDisplay, precision_score, recall_score
-from sklearn.decomposition import PCA
 from geomloss import SamplesLoss
 import time
 import pandas as pd
 from torch.utils.data import ConcatDataset
-from torch.optim.lr_scheduler import CosineAnnealingLR
 import pickle
 import seaborn as sns
 import matplot.pyplot as plt
+from umap import UMAP
 
 from architecture_OT import Network
-from dataset_OT import make_multi_WSI_loader, patches_loader, make_loaders
+from dataset_OT import patches_loader, make_multi_WSI_dataset
 
 # Ensuring reproducibility
 seed = 42
@@ -58,6 +57,9 @@ Lambda = 0.1 # strength of OT (0.1 is the value of the article)
 
     
 # Defining OT-based loss function
+loss_geom = SamplesLoss('sinkhorn', p=2, blur=0.1, scaling=0.95, verbose=False)
+Lambda = 0.1 # strength of OT (0.1 is the value of the article)
+
 loss_geom = SamplesLoss('sinkhorn', p=2, blur=0.1, scaling=0.95, verbose=False)
 Lambda = 0.1 # strength of OT (0.1 is the value of the article)
 
@@ -89,7 +91,7 @@ class NetworkHandler:
         self.grad_scaler = GradScaler(enabled=self.use_amp)
 
     
-    def training_no_OT(self, scanners_train, batch_size, num_epochs):
+    def training_no_OT(self, batch_size, num_epochs):
         # here we train only using cross entropy
         training_stats = []
         min_loss_val, max_accuracy_val = float("inf"), -float("inf")
@@ -98,12 +100,33 @@ class NetworkHandler:
         optimizer = torch.optim.AdamW(trainable_params, lr=1e-4, weight_decay=0.01)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
-        '''loader_train = make_multi_WSI_loader(subset, WSI_ids_train, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        loader_val = make_multi_WSI_loader(subset, WSI_ids_val, ['Leica'], train_or_test='Train', batch_size=batch_size)'''
+        idx_range_subset1 = [i for i in range(1,52+1)] #only the 26 first slides
+        random.shuffle(idx_range_subset1)
+        num_train = int(np.ceil(0.7 * len(idx_range_subset1))) 
+        train_range1, val_range1 = idx_range_subset1[:num_train], idx_range_subset1[num_train:]
+        
+        idx_range_subset3 = [i for i in range(1,26+1)] 
+        random.shuffle(idx_range_subset3)
+        num_train = int(np.ceil(0.7 * len(idx_range_subset3))) 
+        train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
+    
+        akoya_loader_train_subset1 = make_multi_WSI_loader('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_val_subset1 = make_multi_WSI_loader('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_train_subset3 = make_multi_WSI_loader('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_val_subset3 = make_multi_WSI_loader('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        leica_loader_train = make_multi_WSI_loader('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+        leica_loader_val = make_multi_WSI_loader('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+    
+        loader_train = ConcatDataset([akoya_loader_train_subset1.dataset, akoya_loader_train_subset3.dataset, leica_loader_train.dataset])
+        loader_val = ConcatDataset([akoya_loader_val_subset1.dataset, akoya_loader_val_subset3.dataset, leica_loader_val.dataset])
+    
+        loader_train = DataLoader(loader_train, batch_size=batch_size, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True)
+        loader_val = DataLoader(loader_val, batch_size=batch_size, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True)
+            
         len_loader_train = len(loader_train)
         len_loader_val = len(loader_val)
 
-        for epoch in range(0, num_epochs):
+        for epoch in range(1, num_epochs+1):
             
 
             metrics_train = {'running_loss': 0, 'predictions': [], 'labels': []}
@@ -120,6 +143,7 @@ class NetworkHandler:
             pbar = tqdm(loader_train, desc=f'Epoch:{epoch} Training with Cross-Entropy in progress')
             
             for batch in pbar:
+                batch_train_start = time.time()
                 
                 patch = batch['embedding'] if self.emb_mode else batch['img'] 
                 patch = patch.to(self.device, non_blocking=True)
@@ -319,63 +343,26 @@ class NetworkHandler:
             dim_reduc_plot(embeddings=sampled_embeddings, y_true=sampled_labels, scanner=scanner, custom_name=custom_name, n_components=2)
 
 
-    def training_OT(self, num_epochs, custom_name, batch_size): 
+    def training_OT(self, batch_size, num_epochs): 
         # we differentiate explicitly source and target scanner to apply the OT loss
         # training with validation
 
         training_stats = []
         min_loss_val, max_accuracy_val = float("inf"), -float('inf')
-
+        
+        min_len_train = min(len(akoya_loader_train), len(leica_loader_train))
+        min_len_val = min(len(akoya_loader_val), len(leica_loader_val))
+        
         trainable_params = list(filter(lambda p: p.requires_grad, self.model.parameters()))
         optimizer = torch.optim.AdamW(trainable_params, lr=10e-4, weight_decay=0.01)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
+        ce_loss = nn.CrossEntropyLoss()
         
         #Data loading (parallelise Akoya and Leica data loaders with resampling for Leica)
         # if this works, delete "optimised loader" (useless)
         
-        print('Loading starting...')
-        idx_range_subset1 = [i for i in range(1,52+1)]
-        random.shuffle(idx_range_subset1)
-        num_train = int(np.ceil(0.7 * len(idx_range_subset1))) #modif !!
-        train_range1, val_range1 = idx_range_subset1[:num_train], idx_range_subset1[num_train:]
         
-        idx_range_subset3 = [i for i in range(1,26+1)] #PUT REAL NUMBERS AFTER
-        random.shuffle(idx_range_subset3)
-        num_train = int(np.ceil(0.7 * len(idx_range_subset3))) #modif !!
-        train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
-
-        akoya_loader_train_subset1 = make_multi_WSI_loader('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_val_subset1 = make_multi_WSI_loader('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_train_subset3 = make_multi_WSI_loader('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_val_subset3 = make_multi_WSI_loader('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        leica_loader_train = make_multi_WSI_loader('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
-        leica_loader_val = make_multi_WSI_loader('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
-
-        akoya_loader_train = ConcatDataset([akoya_loader_train_subset1.dataset, akoya_loader_train_subset3.dataset])
-        akoya_loader_val = ConcatDataset([akoya_loader_val_subset1.dataset, akoya_loader_val_subset3.dataset])
-
-        # resampling to ensure that OT loss receives as many Akoya as Leica during training and validation
-        len_train = len(akoya_loader_train)
-        len_val = len(akoya_loader_val)
-
-        len_leica_train = len(leica_loader_train)
-        len_leica_val = len(leica_loader_val)
-
-        
-        akoya_loader_train = DataLoader(akoya_loader_train, batch_size=batch_size, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True)
-        akoya_loader_val = DataLoader(akoya_loader_val, batch_size=batch_size, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True)
-        leica_loader_train = DataLoader(leica_loader_train, batch_size=batch_size, num_workers=6, pin_memory=True, persistent_workers=True,
-                                sampler=RandomSampler(leica_loader_train, replacement=True, num_samples=len_train)).dataset
-        leica_loader_val = DataLoader(leica_loader_val, batch_size=batch_size, num_workers=6, pin_memory=True, persistent_workers=True,
-                                sampler=RandomSampler(leica_loader_val, replacement=True, num_samples=len_val)).dataset
-        
-        akoya_train_iter = iter(akoya_loader_train)
-        leica_train_iter = iter(leica_loader_train)
-        akoya_val_iter   = iter(akoya_loader_val)
-        leica_val_iter   = iter(leica_loader_val)
-
-        print('... Loading finished')
 
         for epoch in range(1,num_epochs+1):
             metrics_train = {'running_loss': 0, 'predictions': [], 'labels': []}
@@ -403,46 +390,35 @@ class NetworkHandler:
                 self.model.encoder.eval()
 
             #the target scanner is Akoya
-
-            pbar = tqdm(range(len_train), desc=f'Epoch {epoch} Training - Optimal Transport in progress')
             
-            for _ in pbar:
-                #fetch akoya
-                try:
-                    batch_akoya = next(akoya_train_iter)
-                except StopIteration:
-                    akoya_train_iter = iter(akoya_loader_train)
-                    batch_akoya = next(akoya_train_iter)
-                
-                #fetch Leica
-                try:
-                    batch_leica = next(leica_train_iter)
-                except StopIteration:
-                    leica_train_iter = iter(leica_loader_train)
-                    batch_leica = next(leica_train_iter)
+            for batch_akoya, batch_leica in tqdm(zip(akoya_loader_train, leica_loader_train),
+                                                desc=f"Epoch {epoch} Training - OT in progress",
+                                                total=min_len_train):
+            #for batch_akoya in tqdm(akoya_loader_train, desc=f'Epoch {epoch} Training - Optimal Transport in progress'):
+                #batch_leica = next(leica_train_iter)
 
                 patches_akoya = (batch_akoya['embedding'] if self.emb_mode else batch_akoya['img']).to(self.device, non_blocking=True)
                 patches_leica = (batch_leica['embedding'] if self.emb_mode else batch_leica['img']).to(self.device, non_blocking=True)
                 labels_akoya = batch_akoya['label'].to(self.device, non_blocking=True)
                 labels_leica = batch_leica['label'].to(self.device, non_blocking=True)
 
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
     
                 with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
                     #if embeddings from gigapath are already computed, we can speed up training
                     #the name embedding is ambiguous, in "batch_akoya['embedding']" it refers to Gigapath, in the line below it refers to my model with bottleneck
-                    embedding_akoya = self.model.bottle_neck(patches_akoya).to(self.device, non_blocking=True)
-                    embedding_leica = self.model.bottle_neck(patches_leica).to(self.device, non_blocking=True)
-                    logits_akoya = self.model(patches_akoya).to(self.device, non_blocking=True) 
-                    logits_leica = self.model(patches_leica).to(self.device, non_blocking=True)
-                    
+                    embedding_akoya = self.model.bottle_neck(patches_akoya) #.to(self.device, non_blocking=True)
+                    embedding_leica = self.model.bottle_neck(patches_leica) #.to(self.device, non_blocking=True)
+                    logits_akoya = self.model(patches_akoya) #.to(self.device, non_blocking=True) 
+                    logits_leica = self.model(patches_leica) #.to(self.device, non_blocking=True)
+
+                    OT_loss_train = supervised_OT_loss(embedding_akoya, embedding_leica, labels_akoya, labels_leica)
                     # loss function
-                    loss_train = (nn.CrossEntropyLoss()(logits_akoya, labels_akoya) 
-                                  + (len_leica_train / len_train) * nn.CrossEntropyLoss()(logits_leica, labels_leica) 
-                                  + Lambda * loss_geom(embedding_akoya.detach().squeeze(), embedding_leica.squeeze()) 
+                    loss_train = (ce_loss(logits_akoya, labels_akoya) 
+                                  +  ce_loss(logits_leica, labels_leica) #to avoid that the model specialises in Akoya
+                                  + 0.01 * OT_loss_train 
                                  )
-                    #coefficient in front of Leica Cross Entropy to compensate for the resampling
-                    # detach on Leica because we want to penalize for the wrong representation of Leica and migrate it to Akoya
+                    
                 self.grad_scaler.scale(loss_train).backward()
                 self.grad_scaler.step(optimizer)
                 self.grad_scaler.update()
@@ -457,16 +433,15 @@ class NetworkHandler:
                 #performance metrics
                 metrics_train['running_loss'] += loss_train.detach().cpu().item()
                 # we concatenate the predictions of source and target
-                metrics_train['predictions'].extend(pred_akoya.cpu().numpy())
-                metrics_train['predictions'].extend(pred_leica.cpu().numpy())
-                metrics_train['labels'].extend(labels_akoya.cpu().numpy())
-                metrics_train['labels'].extend(labels_leica.cpu().numpy())
+                metrics_train['predictions'].extend(pred_akoya.detach().cpu().numpy())
+                metrics_train['predictions'].extend(pred_leica.detach().cpu().numpy())
+                metrics_train['labels'].extend(labels_akoya.detach().cpu().numpy())
+                metrics_train['labels'].extend(labels_leica.detach().cpu().numpy())
 
                 
             
-            epoch_loss_train = metrics_train['running_loss'] / (2*len_train) #multiplied by 2 because we considered two datasets
-            epoch_balanced_accuracy_train = balanced_accuracy_score(metrics_train['labels'], metrics_train['predictions'])
-                
+            epoch_loss_train = metrics_train['running_loss'] / min_len_train 
+            epoch_balanced_accuracy_train = balanced_accuracy_score(metrics_train['labels'], metrics_train['predictions'])               
                 
           
             # 2nd part: validation for one epoch 
@@ -475,22 +450,9 @@ class NetworkHandler:
                 
                 #we still work with the Train folder
                 
-                pbar = tqdm(range(len_val), desc=f'Epoch:{epoch} Validation - Optimal Transport in progress')
-                
-                for _ in pbar:
-                    # Fetch Akoya validation batch
-                    try:
-                        batch_akoya_val = next(akoya_val_iter)
-                    except StopIteration:
-                        akoya_val_iter = iter(akoya_loader_val)
-                        batch_akoya_val = next(akoya_val_iter)
-
-                    # Fetch Leica validation batch
-                    try:
-                        batch_leica_val = next(leica_val_iter)
-                    except StopIteration:
-                        leica_val_iter = iter(leica_loader_val)
-                        batch_leica_val = next(leica_val_iter)
+                for batch_akoya_val, batch_leica_val in tqdm(zip(akoya_loader_val, leica_loader_val),
+                                                desc=f"Epoch {epoch} Validation - OT in progress",
+                                                total=min_len_val):
 
                     patches_akoya_val = (batch_akoya_val['embedding'] if self.emb_mode else batch_akoya_val['img']).to(self.device, non_blocking=True)
                     patches_leica_val = (batch_leica_val['embedding'] if self.emb_mode else batch_leica_val['img']).to(self.device, non_blocking=True)
@@ -498,18 +460,18 @@ class NetworkHandler:
                     labels_leica_val = batch_leica_val['label'].to(self.device, non_blocking=True)
 
                     with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
-                        embedding_akoya_val = self.model.bottle_neck(patches_akoya_val).to(self.device, non_blocking=True)
-                        embedding_leica_val = self.model.bottle_neck(patches_leica_val).to(self.device, non_blocking=True)
-                        logits_akoya_val = self.model(patches_akoya_val).to(self.device, non_blocking=True)
-                        logits_leica_val = self.model(patches_leica_val).to(self.device, non_blocking=True)
+                        embedding_akoya_val = self.model.bottle_neck(patches_akoya_val) #.to(self.device, non_blocking=True)
+                        embedding_leica_val = self.model.bottle_neck(patches_leica_val) #.to(self.device, non_blocking=True)
+                        logits_akoya_val = self.model(patches_akoya_val) #.to(self.device, non_blocking=True)
+                        logits_leica_val = self.model(patches_leica_val) #.to(self.device, non_blocking=True)
                         
-                        CE_target_val = nn.CrossEntropyLoss()(logits_akoya_val, labels_akoya_val)
-                        CE_source_val = nn.CrossEntropyLoss()(logits_leica_val, labels_leica_val)
-                        OT_loss_val = loss_geom(embedding_akoya_val.detach().squeeze(), embedding_leica_val.detach().squeeze())
+                        CE_target_val = ce_loss(logits_akoya_val, labels_akoya_val)
+                        CE_source_val = ce_loss(logits_leica_val, labels_leica_val)
+                        OT_loss_val = supervised_OT_loss(embedding_akoya_val, embedding_leica_val, labels_akoya_val, labels_leica_val)
                         loss_val = (
-                            CE_target_val
-                            + (len_leica_val/len_val) * CE_source_val
-                            + Lambda * OT_loss_val
+                            CE_target_val #to avoid that the model specialises in Akoya
+                            + CE_source_val
+                            + 0.01 * OT_loss_val
                         )
                         #here we detach both because we do not compute the gradient
                     
@@ -520,21 +482,20 @@ class NetworkHandler:
 
                     # Update validation metrics
                     metrics_val['running_loss'] += loss_val.detach().cpu().item()
-                    metrics_val['predictions_akoya'].extend(pred_akoya_val.cpu().numpy())
-                    metrics_val['predictions'].extend(pred_akoya_val.cpu().numpy())
-                    metrics_val['predictions_leica'].extend(pred_leica_val.cpu().numpy())
-                    metrics_val['predictions'].extend(pred_leica_val.cpu().numpy())
-                    metrics_val['labels_akoya'].extend(labels_akoya_val.cpu().numpy())
-                    metrics_val['labels'].extend(labels_akoya_val.cpu().numpy())
-                    metrics_val['labels_leica'].extend(labels_leica_val.cpu().numpy())
-                    metrics_val['labels'].extend(labels_leica_val.cpu().numpy())
+                    metrics_val['predictions_akoya'].extend(pred_akoya_val.detach().cpu().numpy())
+                    metrics_val['predictions'].extend(pred_akoya_val.detach().cpu().numpy())
+                    metrics_val['predictions_leica'].extend(pred_leica_val.detach().cpu().numpy())
+                    metrics_val['predictions'].extend(pred_leica_val.detach().cpu().numpy())
+                    metrics_val['labels_akoya'].extend(labels_akoya_val.detach().cpu().numpy())
+                    metrics_val['labels'].extend(labels_akoya_val.detach().cpu().numpy())
+                    metrics_val['labels_leica'].extend(labels_leica_val.detach().cpu().numpy())
+                    metrics_val['labels'].extend(labels_leica_val.detach().cpu().numpy())
                     metrics_val['CE_target_val'] += CE_target_val.detach().cpu().item()
                     metrics_val['CE_source_val'] += CE_source_val.detach().cpu().item()
                     metrics_val['OT_loss_val'] += OT_loss_val.detach().cpu().item()
         
-                    #pbar.set_postfix({"step_loss": loss.detach().item()})
         
-                epoch_loss_val = metrics_val['running_loss'] / (2*len_val) #we multiplied by 2 because we considered two datasets
+                epoch_loss_val = metrics_val['running_loss'] / min_len_val
                 
                 epoch_balanced_accuracy_val = balanced_accuracy_score(metrics_val['labels'], metrics_val['predictions'])
                 
@@ -550,9 +511,9 @@ class NetworkHandler:
                     'epoch_balanced_accuracy_val': epoch_balanced_accuracy_val, 
                     'time': end - start,
                     'cm':cm,
-                    'CE_target_val': metrics_val['CE_target_val'] / (2*len_val),
-                    'OT_loss_val': metrics_val['OT_loss_val'] / (2*len_val),
-                    'CE_source_val': metrics_val['CE_source_val'] / (2*len_val),
+                    'CE_target_val': metrics_val['CE_target_val'] / min_len_val,
+                    'OT_loss_val': metrics_val['OT_loss_val'] / min_len_val,
+                    'CE_source_val': metrics_val['CE_source_val'] / min_len_val,
                     'acc_target': balanced_accuracy_score(metrics_val['labels_akoya'], metrics_val['predictions_akoya']),
                     'acc_source': balanced_accuracy_score(metrics_val['labels_leica'], metrics_val['predictions_leica'])
                       }
@@ -579,89 +540,6 @@ class NetworkHandler:
                 
             
         return epoch_loss_val, epoch_balanced_accuracy_val
-
-'''
-        #before 
-        # 2nd part: validation (WHAT ABOUT torch.no_grad() ??????)
-        self.model.eval()
-        
-        target_dataset_val = multi_WSI_loader(WSI_ids_val, target_scanner, train_or_test='Train')
-        source_dataset_val = multi_WSI_loader(WSI_ids_val, source_scanner, train_or_test='Train')
-
-        # DataLoaders
-        loader_target_val = DataLoader(target_dataset_val, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
-        loader_source_val = DataLoader(source_dataset_val, batch_size=batch_size, shuffle=True, num_workers=4, drop_last=True)
-        
-        iterator_target_val = iter(loader_target_val)
-        iterator_source_val = iter(loader_source_val)
-
-        
-        for i in range(len(loader_source_val)): #maybe change the loop?
-            
-            try: #potentially the scanner datasets do not have the same length
-                patch_source_val, label_source_val, _ = next(iterator_source_val) #we dont really care about metadata here
-            except StopIteration:
-                iterator_source_val = iter(loader_source_val)
-                patch_source_val, label_source_val, _ = next(iterator_source_val)
-        
-            try: #potentially the scanner datasets do not have the same length
-                patch_target_val, label_target_val, _ = next(iterator_target_val) #we dont really care about metadata here
-            except StopIteration:
-                iterator_target_val = iter(loader_target_val)
-                patch_target_val, label_target_val, _ = next(iterator_target_val)
-
-            patch_source_val = patch_source_val.to(self.device)
-            label_source_val = label_source_val.to(self.device)
-            patch_target_val = patch_target_val.to(self.device)
-            label_target_val = label_target_val.to(self.device)
-
-            #pbar = tqdm(train_loader_target, desc='Training with OT in progress')
-
-            with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
-                #if embeddings from gigapath are already computed, we can speed up training
-                logits_source_val =  self.model.bottle_neck(patch_source_val) if self.embedding_mode else self.model(patch_source_val)
-                logits_target_val = self.model.bottle_neck(patch_target_val) if self.embedding_mode else self.model(patch_target_val)
-                # source features
-                feat_source_val = nn.Sequential(*list(self.model.children())[:-1])(patch_source_val)
-                # target features
-                feat_target_val = nn.Sequential(*list(self.model.children())[:-1])(patch_target_val)
-
-                #OT loss
-                loss_g = loss_geom(feat_source_val.detach().squeeze, feat_target_val.detach().squeeze)
-            
-                # liberty taken here: instead of copy-pasting the code from https://github.com/kiakh93/OT-regularized-UDA/blob/main/train_OT.py
-                # i decided to compute two cross entropies for source and target domain
-
-                #CE loss
-                loss_c = nn.CrossEntropyLoss(logits_source_val, label_source_val) + nn.CrossEntropyLoss(logits_target_val, label_target_val)
-                
-                # total loss
-                loss_val = loss_c + Lambda*loss_g
-                
-            
-            # performance
-            confidence_source_val = F.softmax(logits_source_val, dim=1) #why not include that in the network directly in forward?
-            confidence_target_val = F.softmax(logits_target_val, dim=1)
-            pred_source_val = torch.argmax(confidence_source_val, dim=1)
-            pred_target_val = torch.argmax(confidence_target_val, dim=1)
-
-
-            #performance metrics
-            metrics_val['running_loss'] += loss_val.detach().cpu().item()
-            # we concatenate the predictions of source and target
-            metrics_val['predictions'].extend(pred_source_val.cpu().numpy())
-            metrics_val['predictions'].extend(pred_target_val.cpu().numpy())
-            metrics_val['labels'].extend(label_source_val.cpu().numpy())
-            metrics_val['labels'].extend(label_target_val.cpu().numpy())
-
-            #pbar.set_postfix({'step_loss': loss_val.detach().cpu().item()})
-        
-        epoch_loss_val = metrics_val['running_loss'] / (len(loader_source_val) + len(loader_target_val))
-        epoch_balanced_accuracy_val = balanced_accuracy_score(metrics_val['labels'], metrics_val['predictions'])
-        
-        return epoch_loss_train, epoch_balanced_accuracy_train, epoch_loss_val, epoch_balanced_accuracy_val
-
-'''
 
     
 
@@ -722,7 +600,6 @@ def train_plot(training_stats, cm, custom_name, plot=False, OT=False):
         plt.show()
     plt.savefig(f'training_stats_{custom_name}.pdf')
     plt.close(fig)
-
 
 def save_checkpoint(
     save_dir,
@@ -794,7 +671,9 @@ def end_epoch(
 
 
 
-from umap import UMAP
+
+
+
 
 def better_confusion_matrix(custom_name, y_true, y_pred, scanner, acc_score):
     label_name = ['Stroma', 'Normal', 'G3', 'G4', 'G5']
@@ -816,7 +695,7 @@ def better_confusion_matrix(custom_name, y_true, y_pred, scanner, acc_score):
     df_perc.loc['precision'] = precisions
 
 
-    fig, ax = plt.subplots(figsize=(5,5))
+    fig, ax = plt.subplots(figsize=(6,6))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=label_name)
     disp.plot(ax=ax, cmap='PuRd')
     #display percentage
@@ -855,13 +734,35 @@ def dim_reduc_plot(embeddings, y_true, scanner, custom_name, n_components=2):
     
     plt.legend(title="Label", labels=['Normal', 'Stroma', 'G3', 'G4', 'G5'], loc="upper left")
     plt.title(f'UMAP plot for {scanner}')
-    plt.savefig(f'/home/leolr-int/nfs/transformed_data/weights/{custom_name}/umap_{scanner}.pdf')
+    plt.savefig(f'/home/leolr-int/nfs/transformed_data/weights/{custom_name}/umap_{scanner}.png')
     plt.plot()
 
     #usage example:
     '''with open('umap_{scanner}_axis.pkl', 'rb') as f:
         loaded_umap = pickle.load(f)
     new_reduced = loaded_umap.transform(new_embeddings)'''
+
+
+def supervised_OT_loss(embedding_akoya, embedding_leica, labels_akoya, labels_leica):
+    OT_loss = embedding_akoya.new_zeros(()) #creates a new tensor with the same dtype and device, with () --> scalar shape
+    #OT_loss = torch.tensor(0.0).to('cuda')
+    device = embedding_akoya.device
+    
+    uniq_akoya = torch.unique(labels_akoya)
+    uniq_leica = torch.unique(labels_leica)
+    common_labels = uniq_akoya[torch.isin(uniq_akoya, uniq_leica)]
+
+    
+    for label in common_labels:
+        akoya_idx = labels_akoya == label
+        leica_idx = labels_leica == label
+        akoya_emb = embedding_akoya[akoya_idx]
+        leica_emb = embedding_leica[leica_idx]
+        
+        label_OT = loss_geom(akoya_emb, leica_emb)
+        OT_loss.add_(label_OT) #in place operation
+        
+    return OT_loss   
 
    
 
@@ -903,12 +804,24 @@ NetworkHandler().extract_embeddings(scanners, WSI_ids, train_or_test, batch_size
 
 '''
 #for inference:
-batch_size = 64
-id_ranges = [i for i in range(1, 26+1)]
-scanner = 'Akoya'
-loader_akoya = make_multi_WSI_loader('Subset3', WSI_ids=id_ranges, scanners=[scanner], train_or_test='Test', batch_size=batch_size)
-handler = NetworkHandler(emb_mode=True)
-handler.inference(custom_name='baseline', scanner=scanner, data_loader=loader_akoya, visual=True)
+inference = True
+
+if inference:
+    custom_name = 'optimal_transport_loss_v2'
+    batch_size = 64
+    id_ranges = [i for i in range(1, 26+1)]
+    
+    scanner = 'KFBio'
+    loader = make_multi_WSI_dataset('Subset3', WSI_ids=id_ranges, scanners=[scanner], train_or_test='Train', batch_size=batch_size)
+    loader = DataLoader(loader, batch_size=batch_size, num_workers=6, pin_memory=True, persistent_workers=True)
+    handler = NetworkHandler(emb_mode=True)
+    handler.inference(custom_name=custom_name, scanner=scanner, data_loader=loader, visual=True)
+    
+    scanner = 'KFBio_FDA'
+    loader = make_multi_WSI_dataset('Subset3', WSI_ids=id_ranges, scanners=[scanner], train_or_test='Train', batch_size=batch_size)
+    loader = DataLoader(loader, batch_size=batch_size, num_workers=6, pin_memory=True, persistent_workers=True)
+    handler = NetworkHandler(emb_mode=True)
+    handler.inference(custom_name=custom_name, scanner=scanner, data_loader=loader, visual=True)
 '''
 
 
@@ -971,313 +884,73 @@ def extract_embeddings(self, extraction_config, batch_size):
 
 
 
+# Example of data loading 
+batch_size = 512 
 
+print('Loading starting...')
+idx_range_subset1 = [i for i in range(1,52+1)]
+random.shuffle(idx_range_subset1)
+num_train = int(np.ceil(0.7 * len(idx_range_subset1))) 
+train_range1, val_range1 = idx_range_subset1[:num_train], idx_range_subset1[num_train:]
 
+idx_range_subset3 = [i for i in range(1,26+1)] 
+random.shuffle(idx_range_subset3)
+num_train = int(np.ceil(0.7 * len(idx_range_subset3))) 
+train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
 
+akoya_loader_train_subset1 = make_multi_WSI_dataset('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+akoya_loader_val_subset1 = make_multi_WSI_dataset('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+akoya_loader_train_subset3 = make_multi_WSI_dataset('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+akoya_loader_val_subset3 = make_multi_WSI_dataset('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+leica_loader_train = make_multi_WSI_dataset('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+leica_loader_val = make_multi_WSI_dataset('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
 
+akoya_loader_train = ConcatDataset([akoya_loader_train_subset1, akoya_loader_train_subset3])
+akoya_loader_val = ConcatDataset([akoya_loader_val_subset1, akoya_loader_val_subset3])
 
+len_akoya_train = len(akoya_loader_train)
+len_akoya_val = len(akoya_loader_val)
 
+len_leica_train = len(leica_loader_train)
+len_leica_val = len(leica_loader_val)
 
+len_train = len_akoya_train + len_leica_train
+len_val = len_akoya_val + len_leica_val
 
+B_A_train = round(batch_size * len_akoya_train / (len_akoya_train + len_leica_train))
+B_L_train = batch_size - B_A_train 
+B_A_val = round(batch_size * len_akoya_val / (len_akoya_val + len_leica_val))
+B_L_val = batch_size - B_A_val
 
+akoya_loader_train = DataLoader(akoya_loader_train, batch_size=B_A_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+akoya_loader_val = DataLoader(akoya_loader_val, batch_size=B_A_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+leica_loader_train = DataLoader(leica_loader_train, batch_size=B_L_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+leica_loader_val = DataLoader(leica_loader_val, batch_size=B_L_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
 
+#leica_train_iter = itertools.cycle(iter(leica_loader_train))
+#leica_val_iter = itertools.cycle(iter(leica_loader_val)) #????
 
+print("Train batches Akoya:", len(akoya_loader_train), 'batch size:', B_A_train)
+print("Train batches Leica:", len(leica_loader_train), 'batch size:', B_L_train)
+print("Validation batches Akoya:", len(akoya_loader_val), 'batch size:', B_A_val)
+print("Validation batches Leica:", len(leica_loader_val), 'batch size:', B_L_val)
 
+#in samples
+print('len train:', len_train)
 
 
 
 
-# Eric's code
 
-class NetworkHandler:
 
-    
 
-    @torch.no_grad()
-    def validate_epoch(self, val_loader: DataLoader) -> Tuple[float, float]:
 
-        """
-        Runs validation for 1 epoch.
 
-        Parameters
-        ----------
-        val_loader: DataLoader
-            The data loader for validation.
 
-        Returns
-        -------
-        epoch_loss: float
-            The loss for the epoch.
 
-        epoch_balanced_accuracy: float
-            The average balanced accuracy for the given epoch.  
-        """
 
-        metrics = {
-            "running_loss": 0,
-            "predictions": [],
-            "targets": []
-        }
 
-        self.model.eval()
-        pbar = tqdm(val_loader, desc="Validation in progress")
-        for patch, target, *_ in pbar:
-            patch = patch.to(self.device)
-            target = target.to(self.device)
 
-            with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
-                logits = self.model.fc(patch) if self.embedding_mode else self.model(patch)
-                loss = self.criterion(logits, target)
-
-            confidence = F.softmax(logits, dim=1)
-            pred = torch.argmax(confidence, dim=1)
-
-            metrics["running_loss"] += loss.detach().cpu().item()
-            metrics["predictions"].extend(pred.cpu().numpy())
-            metrics["targets"].extend(target.cpu().numpy())
-
-            pbar.set_postfix({"step_loss": loss.detach().cpu().item()})
-
-        epoch_loss = metrics["running_loss"] / len(val_loader)
-        epoch_balanced_accuracy = balanced_accuracy_score(metrics["targets"], metrics["predictions"])
-
-        return epoch_loss, epoch_balanced_accuracy
-    
-    # HERE  MUST LOAD THE TEST DATA and change the name to test instead of inference + matrice de confusion !
-    @torch.no_grad()
-    def inference(
-        self, 
-        inference_loader: DataLoader, 
-        save_dir: str = None,
-        filename: str = None
-        ) -> Tuple[float, float]:
-
-        """
-        Performs inference and optionally saves the results as a parquet table
-        for downstream analysis.
-
-        Parameters
-        ----------
-        inference_loader: DataLoader
-            The data loader for inference.
-
-        save_dir: str
-            The directory to save results.
-
-        filename: str
-            The filename to save the results into.
-
-        Returns
-        -------
-        iteration_loss: float
-            The average loss during inference.
-
-        iteration_balanced_accuracy:
-            The average balanced accuracy during inference.
-        """
-
-        if save_dir and not filename:
-            raise ValueError("filename cannot be empty if save dir is specified.")
-        
-        if filename and not save_dir:
-            raise ValueError(f"save_dir must be provided to save results as {filename}")
-
-        metrics = {
-            "loss": [],
-            "confidence_score": [],
-            "prediction": [],
-            "target": [],
-            "area": [],
-            "x": [],
-            "y": [],
-            "w": [],
-            "h": [],
-            "img_idx": []
-        }
-
-        self.model.eval()
-        pbar = tqdm(inference_loader, desc="Inference in progress")
-        for patch, target, metadata in pbar:
-            patch = patch.to(self.device)
-            target = target.to(self.device)
-
-            with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
-                logits = self.model.fc(patch) if self.embedding_mode else self.model(patch)
-                loss = self.criterion(logits, target)
-
-            confidence = F.softmax(logits, dim=1)
-            pred = torch.argmax(confidence, dim=1)
-
-            metrics["loss"].extend(loss.detach().cpu().numpy())
-            metrics["confidence_score"].extend(confidence.cpu().numpy())
-            metrics["prediction"].extend(pred.cpu().numpy())
-            metrics["target"].extend(target.cpu().numpy())
-            
-            metrics["area"].extend(metadata["area"].cpu().numpy())
-            metrics["x"].extend(metadata["x"].cpu().numpy())
-            metrics["y"].extend(metadata["y"].cpu().numpy())
-            metrics["w"].extend(metadata["w"].cpu().numpy())
-            metrics["h"].extend(metadata["h"].cpu().numpy())
-            metrics["img_idx"].extend(metadata["img_idx"].cpu().numpy())
-
-        iteration_loss = sum(metrics["loss"]) / len(metrics["loss"])
-        iteration_balanced_accuracy = balanced_accuracy_score(metrics["target"], metrics["prediction"])
-
-        if save_dir and filename:
-            save_table(metrics, save_dir, filename)
-
-        return iteration_loss, iteration_balanced_accuracy
-    
-    @torch.no_grad()
-    def predict(
-        self,
-        pred_loader: DataLoader,
-        save_dir: str = None,
-        filename: str = None
-        ):
-    
-        """
-        This method is used when the dataset contains samples with no labels.
-        Outputs predictions for each patch without performing evaluation.
-
-        Optionally, will save results as a parquet table for downstream analysis.
-
-        Parameters
-        ----------
-        pred_loader: DataLoader
-            The data loader to iterate over.
-        
-        save_dir: str
-            The directory to save results.
-
-        filename: str
-            The filename to save the results into.
-        """
-
-        if save_dir and not filename:
-            raise ValueError("filename cannot be empty if save dir is specified.")
-        
-        if filename and not save_dir:
-            raise ValueError(f"save_dir must be provided to save results as {filename}")
-        
-        metrics = {
-            "confidence_score": [],
-            "prediction": [],
-            "target": [],
-            "area": [],
-            "x": [],
-            "y": [],
-            "w": [],
-            "h": []
-        }
-
-        self.model.eval()
-        pbar = tqdm(pred_loader, desc="Prediction in progress")
-        for patch, target, metadata in pbar:
-            patch = patch.to(self.device)
-            target = target.to(self.device)
-
-            with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
-                logits = self.model.fc(patch) if self.embedding_mode else self.model(patch)
-            
-            confidence = F.softmax(logits, dim=1)
-            pred = torch.argmax(confidence, dim=1)
-
-            metrics["confidence_score"].extend(confidence.cpu().numpy())
-            metrics["prediction"].extend(pred.cpu().numpy())
-            metrics["target"].extend(target.cpu().numpy())
-            
-            metrics["area"].extend(metadata["area"].cpu().numpy())
-            metrics["x"].extend(metadata["x"].cpu().numpy())
-            metrics["y"].extend(metadata["y"].cpu().numpy())
-            metrics["w"].extend(metadata["w"].cpu().numpy())
-            metrics["h"].extend(metadata["h"].cpu().numpy())
-
-        if save_dir and filename:
-            save_table(metrics, save_dir, filename)
-
-    @torch.no_grad()
-    def extract_embeddings(
-        self, 
-        embed_loader: DataLoader,
-        deeplake_ds: DeepLakeDataset,
-        img_idx: int
-        ):
-
-        """
-        Extracts and saves embeddings in a deep lake dataset.
-
-        Assumes the existence of three inputs:
-            - image patch
-            - label
-            - file key (an index that maps to a file to trace each embedding back to the original image)
-
-        Parameters
-        ----------
-        embed_loader: DataLoader
-            The data loader to iterate throught the dataset.
-
-        deeplake_ds: DeepLakeDataset
-            The deeplake dataset to store the embeddings.
-
-        img_idx: int
-            The index id of the slide associated with the patch.
-        """
-
-        self.model.eval()
-        pbar = tqdm(embed_loader, desc="Extracting embeddings")
-        for patch, label, metadata in pbar:
-            patch = patch.to(self.device)
-
-            with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
-                embedding = self.model.encoder(patch)
-
-            embedding = embedding.detach().cpu()
-
-            area = metadata["area"]
-            x = metadata["x"]
-            y = metadata["y"]
-            w = metadata["w"]
-            h = metadata["h"]
-            img_idx_batched = np.broadcast_to(img_idx, x.shape)
-
-            deeplake_ds.append({
-                "embedding": embedding.numpy(),
-                "label": label.numpy(),
-                "area": area.numpy(),
-                "x": x.numpy(),
-                "y": y.numpy(),
-                "w": w.numpy(),
-                "h": h.numpy(),
-                "img_idx": img_idx_batched
-            })
-
-def save_checkpoint(
-    save_dir: str,
-    model: nn.Module, 
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler,
-    scaler: torch.amp.GradScaler,
-    epoch: int,
-    balanced_accuracy: torch.Tensor | float,
-    loss: torch.Tensor | float,
-    min_val_loss: torch.Tensor | float,
-    max_val_accuracy: torch.Tensor | float
-    ):
-
-    training_state = {
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-        "scaler": scaler.state_dict(),
-        "epoch": epoch,
-        "balanced_accuracy": balanced_accuracy,
-        "loss": loss,
-        "min_val_loss": min_val_loss,
-        "max_val_accuracy": max_val_accuracy
-    }
-
-    torch.save(training_state, os.path.join(save_dir, "checkpoint.pth"))
 
 
 

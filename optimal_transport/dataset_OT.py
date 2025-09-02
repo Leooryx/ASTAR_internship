@@ -161,7 +161,7 @@ class patches_loader(Dataset):
         return embedding
 
 
-class multi_WSI_loader(Dataset):
+class multi_WSI_dataset(Dataset):
     '''
     Class to handle several WSI from different scanners
     Used for training a neural network
@@ -201,7 +201,7 @@ def make_multi_WSI_dataset(subset, WSI_ids, scanners, train_or_test, batch_size)
     datasets = []
     
     for scanner in scanners:
-        dataset = multi_WSI_loader(subset, WSI_ids, scanner, train_or_test)
+        dataset = multi_WSI_dataset(subset, WSI_ids, scanner, train_or_test)
         datasets.append(dataset)
     
     datasets = ConcatDataset(datasets)
