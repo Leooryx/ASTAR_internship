@@ -1,19 +1,3 @@
-# TODO: handle when different scanners than Leica are given for training while not increasing too much the size of data for one batch!
-# TODO: faire une fonction display en dehors de la classe que je peux mettre facilement partout
-# TODO: the code assumes im working with the patch images direclty, but sometimes patch is used for the patch embeddings!! il faut corriger ca
-# TODO: concernant les batch --> mettre le nom de toutes les variables au pluriel
-# TODO: data augmentation strategies?? (last)
-# TODO: way too many repetitions between train and validation --> completely possible to create one function with a little if loop to compute or not gradient
-# TODO: bien mettre les tqdm partout
-
-# entrainer sur Akoya et Leica a chaque fois
-
-
-        # attention, ici il faudra faire la distinction de cas selon que l'on applique les couches OT ou non !
-        #def OT_layers() define somewhere else
-        # self.bottle_neck, self.head = OT_layers(OT)
-
-
 import os
 from typing import (
     Tuple, 
@@ -53,15 +37,6 @@ torch.backends.cudnn.benchmark = False
 loss_geom = SamplesLoss('sinkhorn', p=2, blur=0.1, scaling=0.95, verbose=False)
 Lambda = 0.1 # strength of OT (0.1 is the value of the article)
 
-
-
-    
-# Defining OT-based loss function
-loss_geom = SamplesLoss('sinkhorn', p=2, blur=0.1, scaling=0.95, verbose=False)
-Lambda = 0.1 # strength of OT (0.1 is the value of the article)
-
-loss_geom = SamplesLoss('sinkhorn', p=2, blur=0.1, scaling=0.95, verbose=False)
-Lambda = 0.1 # strength of OT (0.1 is the value of the article)
 
 class NetworkHandler:
     '''
@@ -110,12 +85,12 @@ class NetworkHandler:
         num_train = int(np.ceil(0.7 * len(idx_range_subset3))) 
         train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
     
-        akoya_loader_train_subset1 = make_multi_WSI_loader('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_val_subset1 = make_multi_WSI_loader('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_train_subset3 = make_multi_WSI_loader('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_val_subset3 = make_multi_WSI_loader('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        leica_loader_train = make_multi_WSI_loader('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
-        leica_loader_val = make_multi_WSI_loader('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_train_subset1 = make_multi_WSI_dataset('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_val_subset1 = make_multi_WSI_dataset('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_train_subset3 = make_multi_WSI_dataset('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_val_subset3 = make_multi_WSI_dataset('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        leica_loader_train = make_multi_WSI_dataset('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+        leica_loader_val = make_multi_WSI_dataset('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
     
         loader_train = ConcatDataset([akoya_loader_train_subset1.dataset, akoya_loader_train_subset3.dataset, leica_loader_train.dataset])
         loader_val = ConcatDataset([akoya_loader_val_subset1.dataset, akoya_loader_val_subset3.dataset, leica_loader_val.dataset])
@@ -307,15 +282,16 @@ class NetworkHandler:
     def inference(self, custom_name, scanner, data_loader, visual=True):
         weights = f'/home/leolr-int/nfs/transformed_data/weights/{custom_name}/checkpoint.pth'
         checkpoint = torch.load(weights, weights_only=False, map_location=self.device)
-        handler.model.load_state_dict(checkpoint["model"])        
+        self.model.load_state_dict(checkpoint["model"])        
         
         self.model.eval()
         all_preds, all_labels, all_embeddings = [], [], []
         for batch in tqdm(data_loader, desc='Inference in progress...'):
             vectors= batch['embedding'].to(self.device)
             labels = batch['label'].to(self.device)
-            emb = self.model.bottle_neck(vectors)
+            
             with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
+                emb = self.model.bottle_neck(vectors)
                 logits = self.model.head(emb)
                 
             confidence = F.softmax(logits, dim=1)
@@ -357,12 +333,7 @@ class NetworkHandler:
         optimizer = torch.optim.AdamW(trainable_params, lr=10e-4, weight_decay=0.01)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
-        ce_loss = nn.CrossEntropyLoss()
-        
-        #Data loading (parallelise Akoya and Leica data loaders with resampling for Leica)
-        # if this works, delete "optimised loader" (useless)
-        
-        
+        ce_loss = nn.CrossEntropyLoss()  
 
         for epoch in range(1,num_epochs+1):
             metrics_train = {'running_loss': 0, 'predictions': [], 'labels': []}
@@ -411,12 +382,20 @@ class NetworkHandler:
                     embedding_leica = self.model.bottle_neck(patches_leica) #.to(self.device, non_blocking=True)
                     logits_akoya = self.model(patches_akoya) #.to(self.device, non_blocking=True) 
                     logits_leica = self.model(patches_leica) #.to(self.device, non_blocking=True)
-
-                    OT_loss_train = supervised_OT_loss(embedding_akoya, embedding_leica, labels_akoya, labels_leica)
+                    
+                    #OT_loss_train = loss_geom(embedding_akoya, embedding_leica)
+                    #OT_loss_train = supervised_OT_loss(embedding_akoya, embedding_leica, labels_akoya, labels_leica)
+                    #selective OT
+                    cost_fn_high = make_cost_fn(labels_akoya, labels_leica, p=p_penalty)
+                    loss_high = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.95,
+                           backend="tensorized", cost=cost_fn_high)
+                    OT_loss_train = loss_high(embedding_akoya.detach(), embedding_leica)
+                    
+                    
                     # loss function
                     loss_train = (ce_loss(logits_akoya, labels_akoya) 
                                   +  ce_loss(logits_leica, labels_leica) #to avoid that the model specialises in Akoya
-                                  + 0.01 * OT_loss_train 
+                                  + 0.1 * OT_loss_train 
                                  )
                     
                 self.grad_scaler.scale(loss_train).backward()
@@ -467,14 +446,21 @@ class NetworkHandler:
                         
                         CE_target_val = ce_loss(logits_akoya_val, labels_akoya_val)
                         CE_source_val = ce_loss(logits_leica_val, labels_leica_val)
-                        OT_loss_val = supervised_OT_loss(embedding_akoya_val, embedding_leica_val, labels_akoya_val, labels_leica_val)
+                        #OT_loss_val = loss_geom(embedding_akoya_val, embedding_leica_val)
+                        #OT_loss_val = supervised_OT_loss(embedding_akoya_val, embedding_leica_val, labels_akoya_val, labels_leica_val)
+                        
+                        
+                        cost_fn_high = make_cost_fn(labels_akoya_val, labels_leica_val, p=p_penalty)
+                        loss_high = SamplesLoss(loss="sinkhorn", p=2, blur=0.05, scaling=0.95,
+                           backend="tensorized", cost=cost_fn_high)
+                        OT_loss_val = loss_high(embedding_akoya_val, embedding_leica_val)
+                        
                         loss_val = (
                             CE_target_val #to avoid that the model specialises in Akoya
                             + CE_source_val
-                            + 0.01 * OT_loss_val
+                            + 0.1 * OT_loss_val
                         )
-                        #here we detach both because we do not compute the gradient
-                    
+
                     confidence_akoya_val = F.softmax(logits_akoya_val, dim=1)
                     confidence_leica_val = F.softmax(logits_leica_val, dim=1)
                     pred_akoya_val = torch.argmax(confidence_akoya_val, dim=1)
@@ -672,9 +658,6 @@ def end_epoch(
 
 
 
-
-
-
 def better_confusion_matrix(custom_name, y_true, y_pred, scanner, acc_score):
     label_name = ['Stroma', 'Normal', 'G3', 'G4', 'G5']
     cm = confusion_matrix(y_true, y_pred, labels=[0,1,2,3,4], normalize='true')
@@ -697,7 +680,7 @@ def better_confusion_matrix(custom_name, y_true, y_pred, scanner, acc_score):
 
     fig, ax = plt.subplots(figsize=(6,6))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=label_name)
-    disp.plot(ax=ax, cmap='PuRd')
+    disp.plot(ax=ax, cmap='PuRd', colorbar=False)
     #display percentage
     '''for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
@@ -762,7 +745,46 @@ def supervised_OT_loss(embedding_akoya, embedding_leica, labels_akoya, labels_le
         label_OT = loss_geom(akoya_emb, leica_emb)
         OT_loss.add_(label_OT) #in place operation
         
-    return OT_loss   
+    return OT_loss
+
+
+def make_cost_fn(labels_x, labels_y, p=100.0):
+    """
+    Create a custom cost function with label penalties for SamplesLoss.
+    """
+
+    def cost_fn(x, y):
+        N = x.shape[1]
+        M = y.shape[1]
+
+        x_norm = (x ** 2).sum(dim=2, keepdim=True)        # (B,N,1)
+        y_norm = (y ** 2).sum(dim=2, keepdim=True)        # (B,M,1)
+        xy = torch.bmm(x, y.transpose(1, 2))              # (B,N,M)
+        dist = 0.5 * (x_norm + y_norm.transpose(1, 2) - 2 * xy)
+        dist = torch.clamp_(dist, min=0.0)
+
+        #SamplesLoss compute the cost for x,y / y,x / x,x / y,y --> careful with shapes
+        if N == len(labels_x) and M == len(labels_y):
+            lx, ly = labels_x, labels_y
+            
+        elif N == len(labels_y) and M == len(labels_x):
+            lx, ly = labels_y, labels_x
+            
+        else:
+            #when same vectors x or y are used, necessarily the labels will align, no need for penalty
+            return dist
+
+        lx = lx.to(x.device, non_blocking=True)
+        ly = ly.to(y.device, non_blocking=True)
+
+        lx = lx.unsqueeze(0).unsqueeze(2)        # (1,N,1)
+        ly = ly.unsqueeze(0).unsqueeze(0)        # (1,1,M)
+        S = (lx != ly).float().expand(1, -1, -1) # (B=1,N,M)
+        #-1 means 'keep the size of this dimension dont copy'
+
+        return dist + p * S
+
+    return cost_fn
 
    
 

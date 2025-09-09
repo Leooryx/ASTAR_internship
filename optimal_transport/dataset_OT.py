@@ -6,7 +6,6 @@ import torch
 from PIL import Image
 from torchvision import transforms
 
-
 class ToPILCheck:
     def __call__(self, img):
         if isinstance(img, Image.Image):
