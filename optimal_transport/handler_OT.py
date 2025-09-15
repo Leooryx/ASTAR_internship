@@ -19,7 +19,7 @@ import pandas as pd
 from torch.utils.data import ConcatDataset
 import pickle
 import seaborn as sns
-import matplot.pyplot as plt
+import matplotlib.pyplot as plt
 from umap import UMAP
 
 from architecture_OT import Network
@@ -907,58 +907,60 @@ def extract_embeddings(self, extraction_config, batch_size):
 
 
 # Example of data loading 
-batch_size = 512 
+exemple = False
+if exemple: 
+    batch_size = 512 
 
-print('Loading starting...')
-idx_range_subset1 = [i for i in range(1,52+1)]
-random.shuffle(idx_range_subset1)
-num_train = int(np.ceil(0.7 * len(idx_range_subset1))) 
-train_range1, val_range1 = idx_range_subset1[:num_train], idx_range_subset1[num_train:]
+    print('Loading starting...')
+    idx_range_subset1 = [i for i in range(1,52+1)]
+    random.shuffle(idx_range_subset1)
+    num_train = int(np.ceil(0.7 * len(idx_range_subset1))) 
+    train_range1, val_range1 = idx_range_subset1[:num_train], idx_range_subset1[num_train:]
 
-idx_range_subset3 = [i for i in range(1,26+1)] 
-random.shuffle(idx_range_subset3)
-num_train = int(np.ceil(0.7 * len(idx_range_subset3))) 
-train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
+    idx_range_subset3 = [i for i in range(1,26+1)] 
+    random.shuffle(idx_range_subset3)
+    num_train = int(np.ceil(0.7 * len(idx_range_subset3))) 
+    train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
 
-akoya_loader_train_subset1 = make_multi_WSI_dataset('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-akoya_loader_val_subset1 = make_multi_WSI_dataset('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-akoya_loader_train_subset3 = make_multi_WSI_dataset('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-akoya_loader_val_subset3 = make_multi_WSI_dataset('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-leica_loader_train = make_multi_WSI_dataset('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
-leica_loader_val = make_multi_WSI_dataset('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+    akoya_loader_train_subset1 = make_multi_WSI_dataset('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+    akoya_loader_val_subset1 = make_multi_WSI_dataset('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+    akoya_loader_train_subset3 = make_multi_WSI_dataset('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+    akoya_loader_val_subset3 = make_multi_WSI_dataset('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+    leica_loader_train = make_multi_WSI_dataset('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+    leica_loader_val = make_multi_WSI_dataset('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
 
-akoya_loader_train = ConcatDataset([akoya_loader_train_subset1, akoya_loader_train_subset3])
-akoya_loader_val = ConcatDataset([akoya_loader_val_subset1, akoya_loader_val_subset3])
+    akoya_loader_train = ConcatDataset([akoya_loader_train_subset1, akoya_loader_train_subset3])
+    akoya_loader_val = ConcatDataset([akoya_loader_val_subset1, akoya_loader_val_subset3])
 
-len_akoya_train = len(akoya_loader_train)
-len_akoya_val = len(akoya_loader_val)
+    len_akoya_train = len(akoya_loader_train)
+    len_akoya_val = len(akoya_loader_val)
 
-len_leica_train = len(leica_loader_train)
-len_leica_val = len(leica_loader_val)
+    len_leica_train = len(leica_loader_train)
+    len_leica_val = len(leica_loader_val)
 
-len_train = len_akoya_train + len_leica_train
-len_val = len_akoya_val + len_leica_val
+    len_train = len_akoya_train + len_leica_train
+    len_val = len_akoya_val + len_leica_val
 
-B_A_train = round(batch_size * len_akoya_train / (len_akoya_train + len_leica_train))
-B_L_train = batch_size - B_A_train 
-B_A_val = round(batch_size * len_akoya_val / (len_akoya_val + len_leica_val))
-B_L_val = batch_size - B_A_val
+    B_A_train = round(batch_size * len_akoya_train / (len_akoya_train + len_leica_train))
+    B_L_train = batch_size - B_A_train 
+    B_A_val = round(batch_size * len_akoya_val / (len_akoya_val + len_leica_val))
+    B_L_val = batch_size - B_A_val
 
-akoya_loader_train = DataLoader(akoya_loader_train, batch_size=B_A_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-akoya_loader_val = DataLoader(akoya_loader_val, batch_size=B_A_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-leica_loader_train = DataLoader(leica_loader_train, batch_size=B_L_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-leica_loader_val = DataLoader(leica_loader_val, batch_size=B_L_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    akoya_loader_train = DataLoader(akoya_loader_train, batch_size=B_A_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    akoya_loader_val = DataLoader(akoya_loader_val, batch_size=B_A_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    leica_loader_train = DataLoader(leica_loader_train, batch_size=B_L_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    leica_loader_val = DataLoader(leica_loader_val, batch_size=B_L_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
 
-#leica_train_iter = itertools.cycle(iter(leica_loader_train))
-#leica_val_iter = itertools.cycle(iter(leica_loader_val)) #????
+    #leica_train_iter = itertools.cycle(iter(leica_loader_train))
+    #leica_val_iter = itertools.cycle(iter(leica_loader_val)) #????
 
-print("Train batches Akoya:", len(akoya_loader_train), 'batch size:', B_A_train)
-print("Train batches Leica:", len(leica_loader_train), 'batch size:', B_L_train)
-print("Validation batches Akoya:", len(akoya_loader_val), 'batch size:', B_A_val)
-print("Validation batches Leica:", len(leica_loader_val), 'batch size:', B_L_val)
+    print("Train batches Akoya:", len(akoya_loader_train), 'batch size:', B_A_train)
+    print("Train batches Leica:", len(leica_loader_train), 'batch size:', B_L_train)
+    print("Validation batches Akoya:", len(akoya_loader_val), 'batch size:', B_A_val)
+    print("Validation batches Leica:", len(leica_loader_val), 'batch size:', B_L_val)
 
-#in samples
-print('len train:', len_train)
+    #in samples
+    print('len train:', len_train)
 
 
 
