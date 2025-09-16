@@ -55,6 +55,9 @@ def data_train_val(subset, ids, scanner):
         train_range = [i for i in train_range3 if i in ids]
         val_range = [i for i in val_range3 if i in ids]
 
+    #train_range = [1]
+    #val_range = [5]
+    
     train_dataset = make_multi_WSI_dataset(subset, train_range, [scanner], train_or_test='Train', batch_size=batch_size)
     val_dataset = make_multi_WSI_dataset(subset, val_range, [scanner], train_or_test='Train', batch_size=batch_size)
     return train_dataset, val_dataset
@@ -105,7 +108,7 @@ B_Z_val = batch_size - B_A_val - B_L_val - B_P_val - B_O_val
 
 
 def make_loader(dataset, auto_batch_size):
-    return DataLoader(dataset, batch_size=auto_batch_size, shuffle=True, num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    return DataLoader(dataset, batch_size=auto_batch_size, shuffle=True) #, num_workers=1, pin_memory=True, persistent_workers=True, prefetch_factor=4)
 
 akoya_loader_train = make_loader(akoya_data_train, B_A_train)
 leica_loader_train = make_loader(leica_data_train, B_L_train)
@@ -213,7 +216,7 @@ class NetworkHandler:
             dim_reduc_plot(embeddings=sampled_embeddings, y_true=sampled_labels, scanner=scanner, custom_name=custom_name, n_components=2)
 
 
-    def training_no_OT(self, custom_name, num_epochs=20): 
+    def training_OT(self, custom_name, num_epochs=20): 
         # we differentiate explicitly source and target scanner to apply the OT loss
         # training with validation
 
@@ -246,10 +249,14 @@ class NetworkHandler:
                 self.model.encoder.eval()
 
             #the target scanner is Akoya
+
+            del_count = 0
             
             for batch_akoya, batch_leica, batch_philips, batch_olympus, batch_zeiss in tqdm(zip(akoya_loader_train, leica_loader_train, philips_loader_train, olympus_loader_train, zeiss_loader_train),
-                                                    desc=f"Epoch {epoch} - Training Multi Scanner"):
+                                                    desc=f"Epoch {epoch} - Training Multi Scanner",
+                                                    total = min(len(akoya_loader_train), len(leica_loader_train), len(philips_loader_train), len(olympus_loader_train), len(zeiss_loader_train))):
             
+                del_count += 1
                 count_train += len(batch_akoya) + len(batch_leica) + len(batch_philips) + len(batch_olympus) + len(batch_zeiss)
                 #patches_akoya = (batch_akoya['embedding'] if self.emb_mode else batch_akoya['img']).to(self.device, non_blocking=True)
                 #patches_leica = (batch_leica['embedding'] if self.emb_mode else batch_leica['img']).to(self.device, non_blocking=True)
@@ -270,11 +277,11 @@ class NetworkHandler:
     
                 with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
                     
-                    '''embedding_akoya = self.model.bottle_neck(patch_akoya) #.to(self.device, non_blocking=True)
+                    embedding_akoya = self.model.bottle_neck(patch_akoya) #.to(self.device, non_blocking=True)
                     embedding_leica = self.model.bottle_neck(patch_leica) #.to(self.device, non_blocking=True)
                     embedding_philips = self.model.bottle_neck(patch_philips)
                     embedding_olympus = self.model.bottle_neck(patch_olympus)
-                    embedding_zeiss = self.model.bottle_neck(patch_zeiss)'''
+                    embedding_zeiss = self.model.bottle_neck(patch_zeiss)
 
                     logits_akoya = self.model(patch_akoya) #.to(self.device, non_blocking=True) 
                     logits_leica = self.model(patch_leica) #.to(self.device, non_blocking=True)
@@ -293,7 +300,11 @@ class NetworkHandler:
                                   + ce_loss(logits_leica, labels_leica)
                                   + ce_loss(logits_philips, labels_philips)
                                   + ce_loss(logits_olympus, labels_olympus)
-                                  + ce_loss(logits_zeiss, labels_zeiss))
+                                  + ce_loss(logits_zeiss, labels_zeiss)
+                                  + 0.1 * loss_geom(embedding_akoya, embedding_leica)
+                                  + 0.1 * loss_geom(embedding_akoya, embedding_philips)
+                                  + 0.1 * loss_geom(embedding_akoya, embedding_olympus)
+                                  + 0.1 * loss_geom(embedding_akoya, embedding_zeiss))
                     
                 self.grad_scaler.scale(loss_train).backward()
                 self.grad_scaler.step(optimizer)
@@ -328,6 +339,16 @@ class NetworkHandler:
                     ])
                 )
 
+                if del_count % 50 == 0:  # Every 50 batches
+                    torch.cuda.empty_cache()
+                    
+                # Delete intermediate tensors
+                del patch_akoya, patch_leica, patch_philips, patch_olympus, patch_zeiss
+                del labels_akoya, labels_leica, labels_philips, labels_olympus, labels_zeiss
+                del logits_akoya, logits_leica, logits_philips, logits_olympus, logits_zeiss
+                del pred_akoya, pred_leica, pred_philips, pred_olympus, pred_zeiss
+                del loss_train
+
             epoch_loss_train = metrics_train['running_loss'] / count_train 
             epoch_balanced_accuracy_train = balanced_accuracy_score(metrics_train['labels'], metrics_train['predictions'])               
                 
@@ -337,10 +358,13 @@ class NetworkHandler:
                 self.model.eval()
                 
                 #we still work with the Train folder
+                del_count = 0
                 
                 for batch_akoya, batch_leica, batch_philips, batch_olympus, batch_zeiss in tqdm(zip(akoya_loader_val, leica_loader_val, philips_loader_val, olympus_loader_val, zeiss_loader_val),
-                                                    desc=f"Epoch {epoch} - Training Multi Scanner"):
+                                                    desc=f"Epoch {epoch} - Validation Multi Scanner",
+                                                    total = min(len(akoya_loader_val), len(leica_loader_val), len(philips_loader_val), len(olympus_loader_val), len(zeiss_loader_val))):
 
+                    del_count += 1
                     count_val += len(batch_akoya) + len(batch_leica) + len(batch_philips) + len(batch_olympus) + len(batch_zeiss)
                 
                     patch_akoya = batch_akoya['embedding'].to(self.device, non_blocking=True) 
@@ -355,15 +379,14 @@ class NetworkHandler:
                     labels_olympus = batch_olympus['label'].to(self.device, non_blocking=True)
                     labels_zeiss = batch_zeiss['label'].to(self.device, non_blocking=True)
 
-                    optimizer.zero_grad(set_to_none=True)
         
                     with torch.autocast(device_type = self.device, dtype = torch.float16, enabled = self.use_amp):
                         
-                        '''embedding_akoya = self.model.bottle_neck(patch_akoya) #.to(self.device, non_blocking=True)
+                        embedding_akoya = self.model.bottle_neck(patch_akoya) #.to(self.device, non_blocking=True)
                         embedding_leica = self.model.bottle_neck(patch_leica) #.to(self.device, non_blocking=True)
                         embedding_philips = self.model.bottle_neck(patch_philips)
                         embedding_olympus = self.model.bottle_neck(patch_olympus)
-                        embedding_zeiss = self.model.bottle_neck(patch_zeiss)'''
+                        embedding_zeiss = self.model.bottle_neck(patch_zeiss)
 
                         logits_akoya = self.model(patch_akoya) #.to(self.device, non_blocking=True) 
                         logits_leica = self.model(patch_leica) #.to(self.device, non_blocking=True)
@@ -376,11 +399,11 @@ class NetworkHandler:
                                     + ce_loss(logits_leica, labels_leica)
                                     + ce_loss(logits_philips, labels_philips)
                                     + ce_loss(logits_olympus, labels_olympus)
-                                    + ce_loss(logits_zeiss, labels_zeiss))
-                        
-                    self.grad_scaler.scale(loss_val).backward()
-                    self.grad_scaler.step(optimizer)
-                    self.grad_scaler.update()
+                                    + ce_loss(logits_zeiss, labels_zeiss)
+                                    + 0.1 * loss_geom(embedding_akoya.detach(), embedding_leica)
+                                    + 0.1 * loss_geom(embedding_akoya.detach(), embedding_philips)
+                                    + 0.1 * loss_geom(embedding_akoya.detach(), embedding_olympus)
+                                    + 0.1 * loss_geom(embedding_akoya.detach(), embedding_zeiss))
                     
                     pred_akoya = torch.argmax(F.softmax(logits_akoya, dim=1), dim=1)
                     pred_leica = torch.argmax(F.softmax(logits_leica, dim=1), dim=1)
@@ -410,6 +433,16 @@ class NetworkHandler:
                             labels_zeiss.detach().cpu().numpy()
                         ])
                     )
+
+                    if del_count % 50 == 0:
+                        torch.cuda.empty_cache()
+                        
+                    # Delete tensors
+                    del patch_akoya, patch_leica, patch_philips, patch_olympus, patch_zeiss
+                    del labels_akoya, labels_leica, labels_philips, labels_olympus, labels_zeiss
+                    del logits_akoya, logits_leica, logits_philips, logits_olympus, logits_zeiss
+                    del pred_akoya, pred_leica, pred_philips, pred_olympus, pred_zeiss
+                    del loss_val
         
         
                 epoch_loss_val = metrics_val['running_loss'] / count_val
@@ -455,6 +488,6 @@ class NetworkHandler:
 if __name__ == '__main__':
     handler = NetworkHandler(emb_mode=True)
     save_dir = '/home/leolr-int/nfs/transformed_data/weights'
-    custom_name = 'baseline_multi'
+    custom_name = 'OT_multi_no_detach'
     num_epochs = 20
-    handler.training_no_OT(custom_name, num_epochs=num_epochs)
+    handler.training_OT(custom_name, num_epochs=num_epochs)

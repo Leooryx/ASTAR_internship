@@ -33,10 +33,14 @@ random.seed(42)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False 
 
+# Define global variables
+#metrics_train = {'running_loss':0, 'predictions':[], 'labels':[]}
+#metrics_val = {'running_loss':0, 'predictions':[], 'labels':[]}
+
+
 # Defining OT-based loss function
 loss_geom = SamplesLoss('sinkhorn', p=2, blur=0.1, scaling=0.95, verbose=False)
 Lambda = 0.1 # strength of OT (0.1 is the value of the article)
-
 
 class NetworkHandler:
     '''
@@ -85,12 +89,12 @@ class NetworkHandler:
         num_train = int(np.ceil(0.7 * len(idx_range_subset3))) 
         train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
     
-        akoya_loader_train_subset1 = make_multi_WSI_dataset('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_val_subset1 = make_multi_WSI_dataset('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_train_subset3 = make_multi_WSI_dataset('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        akoya_loader_val_subset3 = make_multi_WSI_dataset('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-        leica_loader_train = make_multi_WSI_dataset('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
-        leica_loader_val = make_multi_WSI_dataset('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_train_subset1 = make_multi_WSI_loader('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_val_subset1 = make_multi_WSI_loader('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_train_subset3 = make_multi_WSI_loader('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        akoya_loader_val_subset3 = make_multi_WSI_loader('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+        leica_loader_train = make_multi_WSI_loader('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+        leica_loader_val = make_multi_WSI_loader('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
     
         loader_train = ConcatDataset([akoya_loader_train_subset1.dataset, akoya_loader_train_subset3.dataset, leica_loader_train.dataset])
         loader_val = ConcatDataset([akoya_loader_val_subset1.dataset, akoya_loader_val_subset3.dataset, leica_loader_val.dataset])
@@ -726,6 +730,7 @@ def dim_reduc_plot(embeddings, y_true, scanner, custom_name, n_components=2):
     new_reduced = loaded_umap.transform(new_embeddings)'''
 
 
+
 def supervised_OT_loss(embedding_akoya, embedding_leica, labels_akoya, labels_leica):
     OT_loss = embedding_akoya.new_zeros(()) #creates a new tensor with the same dtype and device, with () --> scalar shape
     #OT_loss = torch.tensor(0.0).to('cuda')
@@ -751,6 +756,7 @@ def supervised_OT_loss(embedding_akoya, embedding_leica, labels_akoya, labels_le
 def make_cost_fn(labels_x, labels_y, p=100.0):
     """
     Create a custom cost function with label penalties for SamplesLoss.
+    Implementation here is for 'Selective OT'
     """
 
     def cost_fn(x, y):
@@ -796,40 +802,93 @@ def make_cost_fn(labels_x, labels_y, p=100.0):
 
 
 # Example:
-'''
-#for training
-loader_train, loader_val = create_optimized_loaders()
-print(f"Training batches per epoch: {len(loader_train)}") #34k
-print(f"Validation batches per epoch: {len(loader_val)}") #~15k
-scanners_train = ['Akoya', 'Leica'] #add Leica later
-train_or_test = 'Train'
-WSI_ids_train = [i for i in range(1,26+1)] #for testing
-WSI_ids_val = [i for i in range(1,26+1)] #i have to be sure that all labels are represented in validation data
-batch_size = 64
-#subset = 'Subset1'
-training_stats = []
-handler = NetworkHandler(emb_mode=True)
-save_dir = '/home/leolr-int/nfs/transformed_data/weights'
-custom_name = 'baseline_train_val_sep'
 
-num_epochs = 50
-handler.training_no_OT(loader_train, loader_val, num_epochs, custom_name)
+#for embeddings extraction
+example = False
+if example:
+
+    
+    subset = 'Subset3'
+    train_or_test = 'Train'
+    batch_size = 128
+    
+    #Philips
+    WSI_ids_Philips = [i for i in range(1,26+1)] #26
+    NetworkHandler(emb_mode=False).extract_embeddings(subset, ['Philips'], WSI_ids_Philips, train_or_test, batch_size)
+
+    #Olympus
+    WSI_ids_olympus = [i for i in range(1,26+1) if i != 20] #25
+    NetworkHandler(emb_mode=False).extract_embeddings(subset, ['Olympus'], WSI_ids_olympus, train_or_test, batch_size)
+
+    #Zeiss
+    WSI_ids_zeiss = [1,5,6,7,8,9,10,11,12,13,14,16,21,23,25] #15
+    NetworkHandler(emb_mode=False).extract_embeddings(subset, ['Zeiss'], WSI_ids_zeiss, train_or_test, batch_size)
 
 
-'''
+# Example of data loading, training and inference
+exemple = False
+if exemple: 
+    batch_size = 512 
 
-'''scanners = ['Akoya', 'Leica', 'KFBio']
-train_or_test = 'Train'
-WSI_ids = [i for i in range(1,26+1)]
-batch_size = 128
-NetworkHandler().extract_embeddings(scanners, WSI_ids, train_or_test, batch_size)'''
+    print('Loading starting...')
+    idx_range_subset1 = [i for i in range(1,52+1)]
+    random.shuffle(idx_range_subset1)
+    num_train = int(np.ceil(0.7 * len(idx_range_subset1))) 
+    train_range1, val_range1 = idx_range_subset1[:num_train], idx_range_subset1[num_train:]
+    
+    idx_range_subset3 = [i for i in range(1,26+1)] 
+    random.shuffle(idx_range_subset3)
+    num_train = int(np.ceil(0.7 * len(idx_range_subset3))) 
+    train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
+    
+    akoya_loader_train_subset1 = make_multi_WSI_dataset('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+    akoya_loader_val_subset1 = make_multi_WSI_dataset('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+    akoya_loader_train_subset3 = make_multi_WSI_dataset('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+    akoya_loader_val_subset3 = make_multi_WSI_dataset('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
+    leica_loader_train = make_multi_WSI_dataset('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+    leica_loader_val = make_multi_WSI_dataset('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
+    
+    akoya_loader_train = ConcatDataset([akoya_loader_train_subset1, akoya_loader_train_subset3])
+    akoya_loader_val = ConcatDataset([akoya_loader_val_subset1, akoya_loader_val_subset3])
+    
+    len_akoya_train = len(akoya_loader_train)
+    len_akoya_val = len(akoya_loader_val)
+    
+    len_leica_train = len(leica_loader_train)
+    len_leica_val = len(leica_loader_val)
+    
+    len_train = len_akoya_train + len_leica_train
+    len_val = len_akoya_val + len_leica_val
+    
+    B_A_train = round(batch_size * len_akoya_train / (len_akoya_train + len_leica_train))
+    B_L_train = batch_size - B_A_train 
+    B_A_val = round(batch_size * len_akoya_val / (len_akoya_val + len_leica_val))
+    B_L_val = batch_size - B_A_val
+    
+    akoya_loader_train = DataLoader(akoya_loader_train, batch_size=B_A_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    akoya_loader_val = DataLoader(akoya_loader_val, batch_size=B_A_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    leica_loader_train = DataLoader(leica_loader_train, batch_size=B_L_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+    leica_loader_val = DataLoader(leica_loader_val, batch_size=B_L_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
 
-'''
-#for inference:
-inference = True
+    print("Train batches Akoya:", len(akoya_loader_train), 'batch size:', B_A_train)
+    print("Train batches Leica:", len(leica_loader_train), 'batch size:', B_L_train)
+    print("Validation batches Akoya:", len(akoya_loader_val), 'batch size:', B_A_val)
+    print("Validation batches Leica:", len(leica_loader_val), 'batch size:', B_L_val)
 
-if inference:
-    custom_name = 'optimal_transport_loss_v2'
+    #in samples
+    print('len train:', len_train)
+
+    p_penalty = 5
+    
+    handler = NetworkHandler(emb_mode=True)
+    save_dir = '/home/leolr-int/nfs/transformed_data/weights'
+    custom_name = 'optimal_transport_loss_v3_p=5'
+    num_epochs = 50
+    handler.training_OT(batch_size, num_epochs=num_epochs)
+
+
+
+    custom_name = 'optimal_transport_loss_v3_p=5'
     batch_size = 64
     id_ranges = [i for i in range(1, 26+1)]
     
@@ -844,123 +903,6 @@ if inference:
     loader = DataLoader(loader, batch_size=batch_size, num_workers=6, pin_memory=True, persistent_workers=True)
     handler = NetworkHandler(emb_mode=True)
     handler.inference(custom_name=custom_name, scanner=scanner, data_loader=loader, visual=True)
-'''
-
-
-
-# new embeddings extraction: one deeplake dataset + config_extraction
-@torch.no_grad()
-def extract_embeddings(self, extraction_config, batch_size):
-    
-    root_dir = '/home/leolr-int/nfs/transformed_data/all_embeddings'
-    os.makedirs(root_dir, exist_ok=True)
-    embedding_ds = deeplake.create(root_dir)
-    embedding_ds.add_column('embedding', dtype=deeplake.types.Embedding(1536)) 
-    embedding_ds.add_column('subset', dtype=deeplake.types.Text)
-    embedding_ds.add_column('scanner', dtype=deeplake.types.Text)
-    embedding_ds.add_column('WSI_id', deeplake.types.Int32)
-    embedding_ds.add_column('train_or_test', dtype=deeplake.types.Text)
-    embedding_ds.add_column('label', dtype=deeplake.types.Int32)
-    
-    self.model.eval()
-    
-    for config in extraction_config:
-        subset = config['subset']
-        scanner = config['scanner'] 
-        WSI_ids = config['WSI_ids']
-        train_or_test = config['train_or_test']
-        
-        for wsi_id in WSI_ids:
-
-            WSI = patches_loader(subset, train_or_test, wsi_id, scanner, to_torch=True, emb_mode=False)
-            loader = DataLoader(WSI, batch_size=batch_size, shuffle=False, num_workers=6, pin_memory=True)
-            batch_records = []
-
-            for batch in tqdm(loader, desc=f'{subset}_{wsi_id}_{scanner[0]}'):
-                patches = batch['img'].to(self.device).float()
-                labels = batch['label']
-
-                with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=self.use_amp):
-                    embeddings = self.model.encoder(patches)
-                    embeddings = embeddings.detach().cpu().numpy()
-
-                    # accumulate all rows from batch
-                    for emb, label in zip(embeddings, labels):
-                        batch_records.append({
-                            'embedding':emb,
-                            'subset': subset,
-                            'WSI_id': wsi_id, 
-                            'scanner': 'Akoya' if subset == 'Subset1' else scanner,
-                            'train_or_test': train_or_test,
-                            'label': label})
-
-                    # append in large
-                    if len(batch_records) >= 1000:
-                        embedding_ds.append(batch_records)
-                        batch_records.clear()
-
-                # append what is left
-                if batch_records:
-                    embedding_ds.append(batch_records)
-    print('finish')
-
-
-
-# Example of data loading 
-exemple = False
-if exemple: 
-    batch_size = 512 
-
-    print('Loading starting...')
-    idx_range_subset1 = [i for i in range(1,52+1)]
-    random.shuffle(idx_range_subset1)
-    num_train = int(np.ceil(0.7 * len(idx_range_subset1))) 
-    train_range1, val_range1 = idx_range_subset1[:num_train], idx_range_subset1[num_train:]
-
-    idx_range_subset3 = [i for i in range(1,26+1)] 
-    random.shuffle(idx_range_subset3)
-    num_train = int(np.ceil(0.7 * len(idx_range_subset3))) 
-    train_range3, val_range3 = idx_range_subset3[:num_train], idx_range_subset3[num_train:]
-
-    akoya_loader_train_subset1 = make_multi_WSI_dataset('Subset1', train_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-    akoya_loader_val_subset1 = make_multi_WSI_dataset('Subset1', val_range1, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-    akoya_loader_train_subset3 = make_multi_WSI_dataset('Subset3', train_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-    akoya_loader_val_subset3 = make_multi_WSI_dataset('Subset3', val_range3, ['Akoya'], train_or_test='Train', batch_size=batch_size)
-    leica_loader_train = make_multi_WSI_dataset('Subset3', train_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
-    leica_loader_val = make_multi_WSI_dataset('Subset3', val_range3, ['Leica'], train_or_test='Train', batch_size=batch_size)
-
-    akoya_loader_train = ConcatDataset([akoya_loader_train_subset1, akoya_loader_train_subset3])
-    akoya_loader_val = ConcatDataset([akoya_loader_val_subset1, akoya_loader_val_subset3])
-
-    len_akoya_train = len(akoya_loader_train)
-    len_akoya_val = len(akoya_loader_val)
-
-    len_leica_train = len(leica_loader_train)
-    len_leica_val = len(leica_loader_val)
-
-    len_train = len_akoya_train + len_leica_train
-    len_val = len_akoya_val + len_leica_val
-
-    B_A_train = round(batch_size * len_akoya_train / (len_akoya_train + len_leica_train))
-    B_L_train = batch_size - B_A_train 
-    B_A_val = round(batch_size * len_akoya_val / (len_akoya_val + len_leica_val))
-    B_L_val = batch_size - B_A_val
-
-    akoya_loader_train = DataLoader(akoya_loader_train, batch_size=B_A_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-    akoya_loader_val = DataLoader(akoya_loader_val, batch_size=B_A_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-    leica_loader_train = DataLoader(leica_loader_train, batch_size=B_L_train, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-    leica_loader_val = DataLoader(leica_loader_val, batch_size=B_L_val, num_workers=6, pin_memory=True, persistent_workers=True, prefetch_factor=4)
-
-    #leica_train_iter = itertools.cycle(iter(leica_loader_train))
-    #leica_val_iter = itertools.cycle(iter(leica_loader_val)) #????
-
-    print("Train batches Akoya:", len(akoya_loader_train), 'batch size:', B_A_train)
-    print("Train batches Leica:", len(leica_loader_train), 'batch size:', B_L_train)
-    print("Validation batches Akoya:", len(akoya_loader_val), 'batch size:', B_A_val)
-    print("Validation batches Leica:", len(leica_loader_val), 'batch size:', B_L_val)
-
-    #in samples
-    print('len train:', len_train)
 
 
 
